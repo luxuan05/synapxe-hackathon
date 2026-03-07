@@ -1,1 +1,0 @@
-# synapxe-hackathon
