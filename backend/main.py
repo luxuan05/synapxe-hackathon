@@ -11,6 +11,8 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from summarise import router as summarise_router
+from layman import router as layman_router
 
 from database import Base, engine, get_db
 import models
@@ -22,6 +24,8 @@ except Exception:
     chat = None
 
 app = FastAPI()
+app.include_router(summarise_router)
+app.include_router(layman_router)
 # Create tables
 Base.metadata.create_all(bind=engine)
 
