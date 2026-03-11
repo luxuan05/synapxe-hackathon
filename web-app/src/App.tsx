@@ -9,6 +9,7 @@ import AppLayout from "@/layouts/AppLayout";
 import Dashboard from "@/pages/Dashboard";
 import PatientAppointment from "@/pages/PatientAppointment";
 import PatientHistory from "@/pages/PatientHistory";
+import PatientUpdates from "@/pages/PatientUpdates";
 import DoctorProfile from "@/pages/DoctorProfile";
 import NotFound from "@/pages/NotFound";
 import Login from "@/pages/Login";
@@ -45,6 +46,7 @@ const App = () => (
               <Route path="/" element={<Dashboard />} />
               <Route path="/appointment" element={<PatientAppointment />} />
               <Route path="/history" element={<PatientHistory />} />
+              <Route path="/patient-updates" element={<PatientUpdates />} />
               <Route path="/profile" element={<DoctorProfile />} />
             </Route>
             <Route path="*" element={<NotFound />} />

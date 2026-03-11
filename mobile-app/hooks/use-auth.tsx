@@ -32,7 +32,7 @@ type AuthContextValue = {
   profileParticulars: ProfileParticulars | null;
   loginWithSingpass: (username: string, password: string) => Promise<void>;
   registerWithSingpass: (payload: RegisterPayload) => Promise<void>;
-  completeProfileSetup: (payload: ProfileParticulars) => void;
+  completeProfileSetup: (payload: ProfileParticulars) => Promise<void>;
   logout: () => void;
 };
 
@@ -48,6 +48,65 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoading] = useState(false);
   const [needsProfileSetup, setNeedsProfileSetup] = useState(false);
   const [profileParticulars, setProfileParticulars] = useState<ProfileParticulars | null>(null);
+
+  const authFetch = async (path: string, init: RequestInit = {}, accessToken?: string) => {
+    const bearer = accessToken ?? token;
+    if (!bearer) {
+      throw new Error('Missing auth token');
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      return await fetch(`${API_BASE}${path}`, {
+        ...init,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${bearer}`,
+          ...(init.headers ?? {}),
+        },
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
+  const loadPatientProfile = async (accessToken?: string) => {
+    try {
+      const res = await authFetch('/patient/profile', { method: 'GET' }, accessToken);
+      if (!res.ok) {
+        setNeedsProfileSetup(true);
+        return;
+      }
+      const data = (await res.json()) as {
+        date_of_birth: string;
+        phone: string;
+        address: string;
+        emergency_contact: string;
+        medical_conditions: string[];
+        medication_list: string;
+      };
+      const nextProfile: ProfileParticulars = {
+        dateOfBirth: data.date_of_birth ?? '',
+        phone: data.phone ?? '',
+        address: data.address ?? '',
+        emergencyContact: data.emergency_contact ?? '',
+        medicalConditions: data.medical_conditions ?? [],
+        medicationList: data.medication_list ?? '',
+      };
+      setProfileParticulars(nextProfile);
+      const complete =
+        Boolean(nextProfile.dateOfBirth) &&
+        Boolean(nextProfile.phone) &&
+        Boolean(nextProfile.address) &&
+        Boolean(nextProfile.emergencyContact) &&
+        nextProfile.medicalConditions.length > 0 &&
+        Boolean(nextProfile.medicationList);
+      setNeedsProfileSetup(!complete);
+    } catch {
+      setNeedsProfileSetup(true);
+    }
+  };
 
   const postWithTimeout = async (path: string, body: Record<string, unknown>) => {
     const controller = new AbortController();
@@ -85,7 +144,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     setToken(data.access_token as string);
     setUser(nextUser);
-    setNeedsProfileSetup(false);
+    await loadPatientProfile(data.access_token as string);
   };
 
   const registerWithSingpass = async (payload: RegisterPayload) => {
@@ -118,7 +177,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setProfileParticulars(null);
   };
 
-  const completeProfileSetup = (payload: ProfileParticulars) => {
+  const completeProfileSetup = async (payload: ProfileParticulars) => {
+    const res = await authFetch('/patient/profile', {
+      method: 'PUT',
+      body: JSON.stringify({
+        date_of_birth: payload.dateOfBirth,
+        phone: payload.phone,
+        address: payload.address,
+        emergency_contact: payload.emergencyContact,
+        medical_conditions: payload.medicalConditions,
+        medication_list: payload.medicationList,
+      }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail ?? 'Failed to save patient particulars');
+    }
     setProfileParticulars(payload);
     setNeedsProfileSetup(false);
   };

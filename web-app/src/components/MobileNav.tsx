@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { LayoutDashboard, ClipboardList, History, UserCog, Menu, LogOut } from "lucide-react";
+import { LayoutDashboard, ClipboardList, History, UserCog, Menu, LogOut, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
@@ -9,6 +9,7 @@ const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/appointment", icon: ClipboardList, label: "Appointment" },
   { to: "/history", icon: History, label: "Patient History" },
+  { to: "/patient-updates", icon: Sparkles, label: "Patient Updates" },
   { to: "/profile", icon: UserCog, label: "Profile" },
 ];
 

@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -7,12 +7,63 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ChatbotDialog } from '@/components/chatbot-dialog';
 import { useAuth } from '@/hooks/use-auth';
 
+const API_BASE = process.env.EXPO_PUBLIC_API_BASE_URL ?? (Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000');
+const SG_TIMEZONE = 'Asia/Singapore';
+
+const formatSgDateTime = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('en-SG', {
+    timeZone: SG_TIMEZONE,
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
+};
+
 export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [chatOpen, setChatOpen] = useState(false);
-  const { user } = useAuth();
+  const { user, token } = useAuth();
   const displayName = user?.name ?? 'Patient';
+  const [appointment, setAppointment] = useState<{
+    id: number;
+    doctor_name: string;
+    doctor_role: string;
+    date_time: string;
+    venue: string;
+    days_left: number;
+    status: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!token) return;
+    const run = async () => {
+      const res = await fetch(`${API_BASE}/patient/home`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { appointment: typeof appointment };
+        setAppointment(data.appointment);
+      }
+    };
+    void run();
+  }, [token]);
+
+  const appointmentDateText = useMemo(() => {
+    if (!appointment) return 'No upcoming appointment';
+    return formatSgDateTime(appointment.date_time);
+  }, [appointment]);
+
+  const reminderTitle = useMemo(() => {
+    if (!appointment) return 'No appointment';
+    if (appointment.status === 'completed') return 'Appointment completed';
+    return `${appointment.days_left} day${appointment.days_left === 1 ? '' : 's'} left`;
+  }, [appointment]);
 
   return (
     <>
@@ -41,18 +92,18 @@ export default function HomeScreen() {
               <MaterialIcons name="medical-services" size={21} color="#7a35d5" />
             </View>
             <View style={styles.doctorTextWrap}>
-              <Text style={styles.doctorName}>Dr. Emily Chen</Text>
-              <Text style={styles.doctorRole}>General Practitioner</Text>
+              <Text style={styles.doctorName}>{appointment?.doctor_name ?? 'No assigned doctor yet'}</Text>
+              <Text style={styles.doctorRole}>{appointment?.doctor_role ?? 'Awaiting assignment'}</Text>
             </View>
           </View>
 
           <View style={styles.detailRow}>
             <MaterialIcons name="calendar-month" size={18} color="#7a35d5" />
-            <Text style={styles.detailText}>March 9, 2026 - 10:30 AM</Text>
+            <Text style={styles.detailText}>{appointmentDateText}</Text>
           </View>
           <View style={styles.detailRow}>
             <MaterialIcons name="location-on" size={18} color="#7a35d5" />
-            <Text style={styles.detailText}>City Health Clinic, Room 204</Text>
+            <Text style={styles.detailText}>{appointment?.venue ?? 'No venue available'}</Text>
           </View>
 
           <Pressable style={styles.primaryButton}>
@@ -66,8 +117,10 @@ export default function HomeScreen() {
               <MaterialIcons name="schedule" size={24} color="#7a35d5" />
             </View>
             <View style={styles.reminderContent}>
-              <Text style={styles.reminderTitle}>2 days left</Text>
-              <Text style={styles.reminderText}>Until your next appointment</Text>
+              <Text style={styles.reminderTitle}>{reminderTitle}</Text>
+              <Text style={styles.reminderText}>
+                {appointment?.status === 'completed' ? 'Your last appointment is over' : 'Until your next appointment'}
+              </Text>
             </View>
           </View>
 
@@ -99,7 +152,7 @@ export default function HomeScreen() {
         </View>
       </ScrollView>
 
-      <ChatbotDialog open={chatOpen} onClose={() => setChatOpen(false)} />
+      <ChatbotDialog open={chatOpen} onClose={() => setChatOpen(false)} patientId={user?.id ? String(user.id) : undefined} />
     </>
   );
 }

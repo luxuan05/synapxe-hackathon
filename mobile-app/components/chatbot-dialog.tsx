@@ -18,7 +18,7 @@ interface ChatbotDialogProps {
   patientId?: string;
 }
 
-export function ChatbotDialog({ open, onClose, patientId = 'patient_' + Date.now() }: ChatbotDialogProps) {
+export function ChatbotDialog({ open, onClose, patientId = '0' }: ChatbotDialogProps) {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);

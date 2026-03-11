@@ -32,12 +32,23 @@ export default function ProfileScreen() {
   const [medicationList, setMedicationList] = useState(profileParticulars?.medicationList ?? '');
   const [showConditionsDropdown, setShowConditionsDropdown] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
+  const [isSavingParticulars, setIsSavingParticulars] = useState(false);
 
   useEffect(() => {
     if (needsProfileSetup) {
       setShowParticularsModal(true);
     }
   }, [needsProfileSetup]);
+
+  useEffect(() => {
+    if (!profileParticulars) return;
+    setDob(profileParticulars.dateOfBirth ?? '');
+    setPhone(profileParticulars.phone ?? '');
+    setAddress(profileParticulars.address ?? '');
+    setEmergencyContact(profileParticulars.emergencyContact ?? '');
+    setMedicalConditions(profileParticulars.medicalConditions ?? []);
+    setMedicationList(profileParticulars.medicationList ?? '');
+  }, [profileParticulars]);
 
   const sections = [
     {
@@ -78,7 +89,7 @@ export default function ProfileScreen() {
     },
   ];
 
-  const handleSaveParticulars = () => {
+  const handleSaveParticulars = async () => {
     if (
       !dob.trim() ||
       !phone.trim() ||
@@ -91,17 +102,24 @@ export default function ProfileScreen() {
       return;
     }
 
-    completeProfileSetup({
-      dateOfBirth: dob.trim(),
-      phone: phone.trim(),
-      address: address.trim(),
-      emergencyContact: emergencyContact.trim(),
-      medicalConditions,
-      medicationList: medicationList.trim(),
-    });
-    setSetupError(null);
-    setShowConditionsDropdown(false);
-    setShowParticularsModal(false);
+    setIsSavingParticulars(true);
+    try {
+      await completeProfileSetup({
+        dateOfBirth: dob.trim(),
+        phone: phone.trim(),
+        address: address.trim(),
+        emergencyContact: emergencyContact.trim(),
+        medicalConditions,
+        medicationList: medicationList.trim(),
+      });
+      setSetupError(null);
+      setShowConditionsDropdown(false);
+      setShowParticularsModal(false);
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : 'Failed to save particulars');
+    } finally {
+      setIsSavingParticulars(false);
+    }
   };
 
   const toggleCondition = (condition: string) => {
@@ -156,7 +174,7 @@ export default function ProfileScreen() {
         </ScrollView>
       </View>
 
-      <ChatbotDialog open={chatOpen} onClose={() => setChatOpen(false)} />
+      <ChatbotDialog open={chatOpen} onClose={() => setChatOpen(false)} patientId={user?.id ? String(user.id) : undefined} />
 
       <Modal visible={showParticularsModal} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
@@ -237,8 +255,13 @@ export default function ProfileScreen() {
 
             {setupError ? <Text style={styles.modalError}>{setupError}</Text> : null}
 
-            <Pressable style={styles.modalButton} onPress={handleSaveParticulars}>
-              <Text style={styles.modalButtonText}>Save particulars</Text>
+            <Pressable
+              style={[styles.modalButton, isSavingParticulars && styles.modalButtonDisabled]}
+              onPress={handleSaveParticulars}
+              disabled={isSavingParticulars}>
+              <Text style={styles.modalButtonText}>
+                {isSavingParticulars ? 'Saving...' : 'Save particulars'}
+              </Text>
             </Pressable>
           </View>
         </View>
@@ -486,6 +509,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 12,
     backgroundColor: '#7a35d5',
+  },
+  modalButtonDisabled: {
+    opacity: 0.7,
   },
   modalButtonText: {
     color: '#fff',

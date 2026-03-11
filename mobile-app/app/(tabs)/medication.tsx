@@ -4,6 +4,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ChatbotDialog } from '@/components/chatbot-dialog';
+import { useAuth } from '@/hooks/use-auth';
 
 type Med = {
   id: number;
@@ -28,6 +29,7 @@ export default function MedicationScreen() {
   const insets = useSafeAreaInsets();
   const [meds, setMeds] = useState(initialMeds);
   const [chatOpen, setChatOpen] = useState(false);
+  const { user } = useAuth();
 
   const takenCount = useMemo(() => meds.filter((m) => m.taken).length, [meds]);
   const points = takenCount * 25;
@@ -129,7 +131,7 @@ export default function MedicationScreen() {
         </ScrollView>
       </View>
 
-      <ChatbotDialog open={chatOpen} onClose={() => setChatOpen(false)} />
+      <ChatbotDialog open={chatOpen} onClose={() => setChatOpen(false)} patientId={user?.id ? String(user.id) : undefined} />
     </>
   );
 }

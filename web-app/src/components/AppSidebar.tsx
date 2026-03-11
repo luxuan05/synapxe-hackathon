@@ -1,12 +1,13 @@
 import { NavLink } from "react-router-dom";
-import { LayoutDashboard, ClipboardList, History, UserCog, LogOut } from "lucide-react";
+import { LayoutDashboard, ClipboardList, History, UserCog, LogOut, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/auth/AuthContext";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/appointment", icon: ClipboardList, label: "Appointment" },
-  { to: "/history", icon: History, label: "Patient History" },
+  { to: "/history", icon: History, label: "Appointment History" },
+  { to: "/patient-updates", icon: Sparkles, label: "Patient Updates" },
   { to: "/profile", icon: UserCog, label: "Profile" },
 ];
 

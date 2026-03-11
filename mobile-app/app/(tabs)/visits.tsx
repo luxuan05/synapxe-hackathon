@@ -4,6 +4,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ChatbotDialog } from '@/components/chatbot-dialog';
+import { useAuth } from '@/hooks/use-auth';
 
 type Summary = {
   id: number;
@@ -53,6 +54,7 @@ export default function VisitsScreen() {
   const insets = useSafeAreaInsets();
   const [expanded, setExpanded] = useState<number | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
+  const { user } = useAuth();
 
   return (
     <>
@@ -121,7 +123,7 @@ export default function VisitsScreen() {
         </ScrollView>
       </View>
 
-      <ChatbotDialog open={chatOpen} onClose={() => setChatOpen(false)} />
+      <ChatbotDialog open={chatOpen} onClose={() => setChatOpen(false)} patientId={user?.id ? String(user.id) : undefined} />
     </>
   );
 }
