@@ -92,7 +92,7 @@ export default function HomeScreen() {
               <MaterialIcons name="medical-services" size={21} color="#7a35d5" />
             </View>
             <View style={styles.doctorTextWrap}>
-              <Text style={styles.doctorName}>{appointment?.doctor_name ?? 'No assigned doctor yet'}</Text>
+              <Text style={styles.doctorName}>{appointment?.doctor_name ? `Dr ${appointment.doctor_name}`: 'No assigned doctor yet'}</Text>
               <Text style={styles.doctorRole}>{appointment?.doctor_role ?? 'Awaiting assignment'}</Text>
             </View>
           </View>
