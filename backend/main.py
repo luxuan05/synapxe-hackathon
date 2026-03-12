@@ -13,6 +13,16 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from summarise import router as summarise_router
 from layman import router as layman_router
+from patient_logic import (
+    DailyLogRequest,
+    MedicationResponse,
+    MedicationTakenRequest,
+    ensure_scheduler_started,
+    get_overdue_medications,
+    is_missed,
+    schedule_realert,
+    cancel_realert,
+)
 
 from database import Base, engine, get_db
 import models
@@ -136,6 +146,7 @@ def get_current_user(
 @app.on_event("startup")
 def create_tables():
     Base.metadata.create_all(bind=engine)
+    ensure_scheduler_started()
     with engine.begin() as conn:
         existing_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(users)")).fetchall()}
         doctor_cols = {
@@ -159,6 +170,20 @@ def create_tables():
             conn.execute(
                 text("ALTER TABLE appointments ADD COLUMN venue TEXT NOT NULL DEFAULT 'City Health Clinic, Room 204'")
             )
+        
+        med_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(medications)")).fetchall()}
+        if "taken" not in med_cols:
+            conn.execute(text("ALTER TABLE medications ADD COLUMN taken BOOLEAN NOT NULL DEFAULT 0"))
+
+        daily_log_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(daily_logs)")).fetchall()}
+        if "log_date" not in daily_log_cols:
+            conn.execute(text("ALTER TABLE daily_logs ADD COLUMN log_date TEXT"))
+        if "meds_taken" not in daily_log_cols:
+            conn.execute(text("ALTER TABLE daily_logs ADD COLUMN meds_taken BOOLEAN"))
+        if "mood" not in daily_log_cols:
+            conn.execute(text("ALTER TABLE daily_logs ADD COLUMN mood TEXT"))
+        if "questions" not in daily_log_cols:
+            conn.execute(text("ALTER TABLE daily_logs ADD COLUMN questions TEXT"))
 
         # Defensive cleanup: some manual migrations can accidentally persist
         # literal CURRENT_TIMESTAMP strings instead of concrete datetime values.
@@ -753,6 +778,174 @@ def patient_home(user: models.User = Depends(get_current_user), db: Session = De
             "status": appointment.status,
         }
     }
+
+@app.post("/patient/daily-log")
+def save_daily_log(
+    payload: DailyLogRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role != "patient":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Patient access only",
+        )
+
+    patient_id = int(current_user.id)
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    existing = (
+        db.query(models.DailyLog)
+        .filter(
+            models.DailyLog.patient_id == patient_id,
+            models.DailyLog.log_date == today,
+        )
+        .first()
+    )
+
+    if existing:
+        existing.question = json.dumps(payload.questions)
+        existing.answer_yes = payload.meds_taken
+        existing.meds_taken = payload.meds_taken
+        existing.mood = payload.mood
+        existing.questions = json.dumps(payload.questions)
+    else:
+        log = models.DailyLog(
+            patient_id=patient_id,
+            question=json.dumps(payload.questions),   # old schema compatibility
+            answer_yes=payload.meds_taken,           # old schema compatibility
+            log_date=today,
+            meds_taken=payload.meds_taken,
+            mood=payload.mood,
+            questions=json.dumps(payload.questions),
+        )
+        db.add(log)
+
+    if payload.meds_taken:
+        due_meds = get_overdue_medications(db, patient_id)
+        for med in due_meds:
+            med.taken = True
+        cancel_realert(patient_id)
+    else:
+        schedule_realert(patient_id)
+
+    db.commit()
+
+    return {
+        "message": "Daily log saved",
+        "patient_id": patient_id,
+        "log_date": today,
+        "meds_taken": payload.meds_taken,
+        "mood": payload.mood,
+        "questions": payload.questions,
+        "realert_active": not payload.meds_taken,
+    }
+
+@app.get("/patient/medications")
+def get_patient_medications(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role != "patient":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Patient access only",
+        )
+
+    meds = (
+        db.query(models.Medication)
+        .filter(models.Medication.patient_id == current_user.id)
+        .order_by(models.Medication.schedule_time.asc())
+        .all()
+    )
+
+    return [
+        MedicationResponse(
+            id=med.id,
+            name=med.name,
+            dosage=med.dosage,
+            schedule_time=med.schedule_time,
+            taken=bool(med.taken),
+            missed=is_missed(med.schedule_time, bool(med.taken)),
+        )
+        for med in meds
+    ]
+
+
+@app.get("/patient/medications/status")
+def get_patient_medication_status(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role != "patient":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Patient access only",
+        )
+
+    meds = (
+        db.query(models.Medication)
+        .filter(models.Medication.patient_id == current_user.id)
+        .all()
+    )
+
+    payload = []
+    for med in meds:
+        payload.append(
+            {
+                "id": med.id,
+                "name": med.name,
+                "schedule_time": med.schedule_time,
+                "taken": bool(med.taken),
+                "missed": is_missed(med.schedule_time, bool(med.taken)),
+            }
+        )
+
+    return {
+        "patient_id": current_user.id,
+        "medications": payload,
+        "overdue_count": sum(1 for m in payload if m["missed"]),
+    }
+
+
+@app.post("/patient/medications/{medication_id}/taken")
+def mark_medication_taken(
+    medication_id: int,
+    payload: MedicationTakenRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role != "patient":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Patient access only",
+        )
+
+    med = (
+        db.query(models.Medication)
+        .filter(
+            models.Medication.id == medication_id,
+            models.Medication.patient_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not med:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Medication not found")
+
+    med.taken = payload.taken
+    db.commit()
+
+    overdue = get_overdue_medications(db, current_user.id)
+    if not overdue:
+        cancel_realert(current_user.id)
+
+    return {
+        "message": "Medication updated",
+        "medication_id": med.id,
+        "taken": bool(med.taken),
+    }
+
 # -----------------------------
 # POST Doctor Note
 # -----------------------------

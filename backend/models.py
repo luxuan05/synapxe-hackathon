@@ -69,6 +69,7 @@ class Medication(Base):
     name = Column(String, nullable=False)
     dosage = Column(String, nullable=False)
     schedule_time = Column(String, nullable=False)  # e.g. "08:00 AM"
+    taken = Column(Boolean, nullable=False, default=False) 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -77,8 +78,16 @@ class DailyLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     patient_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    question = Column(String, nullable=False)
-    answer_yes = Column(Boolean, nullable=False)
+    # old columns kept for compatibility with existing DB
+    question = Column(String, nullable=True)
+    answer_yes = Column(Boolean, nullable=True)
+
+    # new columns for Member 2
+    log_date = Column(String, nullable=False)
+    meds_taken = Column(Boolean, nullable=False)
+    mood = Column(String)
+    questions = Column(Text)
+    
     logged_at = Column(DateTime(timezone=True), server_default=func.now())
 
 # database table
