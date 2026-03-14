@@ -8,9 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+
 from summarise import router as summarise_router
 from layman import router as layman_router
 from patient_logic import (
@@ -28,17 +29,16 @@ from database import Base, engine, get_db
 import models
 
 from langdetect import detect
+
 try:
     from chatbot import chat
 except Exception:
     chat = None
 
+
 app = FastAPI()
 app.include_router(summarise_router)
 app.include_router(layman_router)
-# Create tables
-Base.metadata.create_all(bind=engine)
-
 
 security = HTTPBearer(auto_error=False)
 
@@ -48,10 +48,10 @@ ACCESS_TOKEN_MINUTES = 60 * 24
 
 raw_origins = os.getenv("WEB_APP_ORIGIN", "http://localhost:5173")
 allowed_origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    # Dev convenience: allow localhost/127.0.0.1 on any Vite port.
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
@@ -69,6 +69,7 @@ class RegisterRequest(BaseModel):
     password: str
     full_name: str
     role: str = "doctor"
+
 
 class DoctorProfileRequest(BaseModel):
     hospital: str
@@ -102,6 +103,11 @@ class SummaryUpdateRequest(BaseModel):
 
 class GeneratePreSummaryRequest(BaseModel):
     patient_id: int
+
+
+class ChatRequest(BaseModel):
+    patient_id: str
+    message: str
 
 
 def sync_appointment_statuses(db: Session):
@@ -147,70 +153,54 @@ def get_current_user(
 def create_tables():
     Base.metadata.create_all(bind=engine)
     ensure_scheduler_started()
+
     with engine.begin() as conn:
-        existing_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(users)")).fetchall()}
-        doctor_cols = {
-            "patient_date_of_birth": "TEXT",
-            "patient_phone": "TEXT",
-            "patient_address": "TEXT",
-            "patient_emergency_contact": "TEXT",
-            "patient_medical_conditions": "TEXT",
-            "patient_medication_list": "TEXT",
-            "doctor_hospital": "TEXT",
-            "doctor_department": "TEXT",
-            "doctor_phone": "TEXT",
-            "doctor_license": "TEXT",
-        }
-        for col, ddl in doctor_cols.items():
-            if col not in existing_cols:
-                conn.execute(text(f"ALTER TABLE users ADD COLUMN {col} {ddl}"))
+        inspector = inspect(conn)
+        tables = set(inspector.get_table_names())
 
-        appt_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(appointments)")).fetchall()}
-        if "venue" not in appt_cols:
-            conn.execute(
-                text("ALTER TABLE appointments ADD COLUMN venue TEXT NOT NULL DEFAULT 'City Health Clinic, Room 204'")
-            )
-        
-        med_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(medications)")).fetchall()}
-        if "taken" not in med_cols:
-            conn.execute(text("ALTER TABLE medications ADD COLUMN taken BOOLEAN NOT NULL DEFAULT 0"))
+        if "users" in tables:
+            existing_cols = {col["name"] for col in inspector.get_columns("users")}
+            user_cols = {
+                "patient_date_of_birth": "VARCHAR(50) NULL",
+                "patient_phone": "VARCHAR(50) NULL",
+                "patient_address": "TEXT NULL",
+                "patient_emergency_contact": "VARCHAR(255) NULL",
+                "patient_medical_conditions": "TEXT NULL",
+                "patient_medication_list": "TEXT NULL",
+                "doctor_hospital": "TEXT NULL",
+                "doctor_department": "TEXT NULL",
+                "doctor_phone": "VARCHAR(50) NULL",
+                "doctor_license": "VARCHAR(100) NULL",
+            }
+            for col, ddl in user_cols.items():
+                if col not in existing_cols:
+                    conn.execute(text(f"ALTER TABLE users ADD COLUMN {col} {ddl}"))
 
-        daily_log_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(daily_logs)")).fetchall()}
-        if "log_date" not in daily_log_cols:
-            conn.execute(text("ALTER TABLE daily_logs ADD COLUMN log_date TEXT"))
-        if "meds_taken" not in daily_log_cols:
-            conn.execute(text("ALTER TABLE daily_logs ADD COLUMN meds_taken BOOLEAN"))
-        if "mood" not in daily_log_cols:
-            conn.execute(text("ALTER TABLE daily_logs ADD COLUMN mood TEXT"))
-        if "questions" not in daily_log_cols:
-            conn.execute(text("ALTER TABLE daily_logs ADD COLUMN questions TEXT"))
+        if "appointments" in tables:
+            appt_cols = {col["name"] for col in inspector.get_columns("appointments")}
+            if "venue" not in appt_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE appointments "
+                        "ADD COLUMN venue VARCHAR(255) NOT NULL DEFAULT 'City Health Clinic, Room 204'"
+                    )
+                )
 
-        # Defensive cleanup: some manual migrations can accidentally persist
-        # literal CURRENT_TIMESTAMP strings instead of concrete datetime values.
-        # SQLAlchemy then fails while parsing datetime fields.
-        conn.execute(text("UPDATE users SET created_at = datetime('now') WHERE created_at LIKE 'CURRENT_TIMESTAMP%'"))
-        conn.execute(
-            text("UPDATE appointments SET created_at = datetime('now') WHERE created_at LIKE 'CURRENT_TIMESTAMP%'")
-        )
-        conn.execute(
-            text("UPDATE appointment_notes SET created_at = datetime('now') WHERE created_at LIKE 'CURRENT_TIMESTAMP%'")
-        )
-        conn.execute(
-            text("UPDATE appointment_notes SET updated_at = datetime('now') WHERE updated_at LIKE 'CURRENT_TIMESTAMP%'")
-        )
-        conn.execute(
-            text("UPDATE ai_summaries SET created_at = datetime('now') WHERE created_at LIKE 'CURRENT_TIMESTAMP%'")
-        )
-        conn.execute(text("UPDATE appointments SET visit_time = REPLACE(visit_time, '-T', 'T') WHERE visit_time LIKE '%-T%'"))
-        conn.execute(
-            text("UPDATE chat_messages SET created_at = datetime('now') WHERE created_at LIKE 'CURRENT_TIMESTAMP%'")
-        )
-        conn.execute(
-            text(
-                "UPDATE pre_appointment_summaries SET generated_at = datetime('now') "
-                "WHERE generated_at LIKE 'CURRENT_TIMESTAMP%'"
-            )
-        )
+        if "medications" in tables:
+            med_cols = {col["name"] for col in inspector.get_columns("medications")}
+            if "taken" not in med_cols:
+                conn.execute(text("ALTER TABLE medications ADD COLUMN taken BOOLEAN NOT NULL DEFAULT FALSE"))
+
+        if "daily_logs" in tables:
+            daily_log_cols = {col["name"] for col in inspector.get_columns("daily_logs")}
+            if "log_date" not in daily_log_cols:
+                conn.execute(text("ALTER TABLE daily_logs ADD COLUMN log_date VARCHAR(20) NULL"))
+            if "meds_taken" not in daily_log_cols:
+                conn.execute(text("ALTER TABLE daily_logs ADD COLUMN meds_taken BOOLEAN NULL"))
+            if "mood" not in daily_log_cols:
+                conn.execute(text("ALTER TABLE daily_logs ADD COLUMN mood VARCHAR(100) NULL"))
+            if "questions" not in daily_log_cols:
+                conn.execute(text("ALTER TABLE daily_logs ADD COLUMN questions TEXT NULL"))
 
 
 @app.get("/")
@@ -220,7 +210,6 @@ def root():
 
 @app.post("/auth/login")
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    # Prototype: "username" maps to user email.
     user = db.query(models.User).filter(models.User.email == payload.username).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
@@ -269,12 +258,10 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         db.commit()
     except OperationalError as exc:
         db.rollback()
-        if "database is locked" in str(exc).lower():
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Database is busy/locked. Close DB Browser or other writers and try again.",
-            )
-        raise
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Database error while creating user: {str(exc)}",
+        )
     db.refresh(user)
 
     if user.role == "patient":
@@ -318,6 +305,34 @@ def me(user: models.User = Depends(get_current_user)):
     }
 
 
+@app.post("/auth/logout")
+def logout():
+    return {"message": "Logged out"}
+
+
+@app.post("/auth/seed-doctor")
+def seed_doctor(db: Session = Depends(get_db)):
+    existing = db.query(models.User).filter(models.User.email == "doctor@example.com").first()
+    if existing:
+        return {"message": "Doctor already exists", "email": existing.email}
+
+    hashed = bcrypt.hashpw("password123".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    user = models.User(
+        email="doctor@example.com",
+        password_hash=hashed,
+        role="doctor",
+        full_name="Dr. Sarah Ahmed",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {
+        "message": "Seed doctor created",
+        "email": user.email,
+        "password": "password123",
+    }
+
+
 @app.get("/doctor/profile")
 def get_doctor_profile(user: models.User = Depends(get_current_user)):
     if user.role != "doctor":
@@ -346,77 +361,6 @@ def update_doctor_profile(
     return {"message": "Doctor profile updated"}
 
 
-@app.get("/patient/profile")
-def get_patient_profile(user: models.User = Depends(get_current_user)):
-    if user.role != "patient":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
-
-    conditions: list[str] = []
-    if user.patient_medical_conditions:
-        try:
-            parsed = json.loads(user.patient_medical_conditions)
-            if isinstance(parsed, list):
-                conditions = [str(item) for item in parsed]
-        except json.JSONDecodeError:
-            conditions = []
-
-    return {
-        "date_of_birth": user.patient_date_of_birth or "",
-        "phone": user.patient_phone or "",
-        "address": user.patient_address or "",
-        "emergency_contact": user.patient_emergency_contact or "",
-        "medical_conditions": conditions,
-        "medication_list": user.patient_medication_list or "",
-    }
-
-
-@app.put("/patient/profile")
-def update_patient_profile(
-    payload: PatientProfileRequest,
-    user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    if user.role != "patient":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
-    user.patient_date_of_birth = payload.date_of_birth.strip()
-    user.patient_phone = payload.phone.strip()
-    user.patient_address = payload.address.strip()
-    user.patient_emergency_contact = payload.emergency_contact.strip()
-    user.patient_medical_conditions = json.dumps(payload.medical_conditions)
-    user.patient_medication_list = payload.medication_list.strip()
-    db.commit()
-    return {"message": "Patient profile updated"}
-
-
-@app.post("/auth/logout")
-def logout():
-    # Stateless JWT prototype: client clears token.
-    return {"message": "Logged out"}
-
-
-@app.post("/auth/seed-doctor")
-def seed_doctor(db: Session = Depends(get_db)):
-    existing = db.query(models.User).filter(models.User.email == "doctor@example.com").first()
-    if existing:
-        return {"message": "Doctor already exists", "email": existing.email}
-
-    hashed = bcrypt.hashpw("password123".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    user = models.User(
-        email="doctor@example.com",
-        password_hash=hashed,
-        role="doctor",
-        full_name="Dr. Sarah Ahmed",
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return {
-        "message": "Seed doctor created",
-        "email": user.email,
-        "password": "password123",
-    }
-
-
 @app.get("/doctor/patients")
 def doctor_patients(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role != "doctor":
@@ -430,6 +374,7 @@ def doctor_patients(user: models.User = Depends(get_current_user), db: Session =
         .order_by(models.Appointment.visit_time.desc())
         .all()
     )
+
     latest_by_patient: dict[int, models.Appointment] = {}
     for appt in doctor_appointments:
         if appt.patient_id not in latest_by_patient:
@@ -747,6 +692,48 @@ def upsert_appointment_notes(
     return {"message": "Appointment notes saved", "summary_text": summary_text, "appointment_id": appointment.id}
 
 
+@app.get("/patient/profile")
+def get_patient_profile(user: models.User = Depends(get_current_user)):
+    if user.role != "patient":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
+
+    conditions: list[str] = []
+    if user.patient_medical_conditions:
+        try:
+            parsed = json.loads(user.patient_medical_conditions)
+            if isinstance(parsed, list):
+                conditions = [str(item) for item in parsed]
+        except json.JSONDecodeError:
+            conditions = []
+
+    return {
+        "date_of_birth": user.patient_date_of_birth or "",
+        "phone": user.patient_phone or "",
+        "address": user.patient_address or "",
+        "emergency_contact": user.patient_emergency_contact or "",
+        "medical_conditions": conditions,
+        "medication_list": user.patient_medication_list or "",
+    }
+
+
+@app.put("/patient/profile")
+def update_patient_profile(
+    payload: PatientProfileRequest,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if user.role != "patient":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
+    user.patient_date_of_birth = payload.date_of_birth.strip()
+    user.patient_phone = payload.phone.strip()
+    user.patient_address = payload.address.strip()
+    user.patient_emergency_contact = payload.emergency_contact.strip()
+    user.patient_medical_conditions = json.dumps(payload.medical_conditions)
+    user.patient_medication_list = payload.medication_list.strip()
+    db.commit()
+    return {"message": "Patient profile updated"}
+
+
 @app.get("/patient/home")
 def patient_home(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role != "patient":
@@ -778,6 +765,7 @@ def patient_home(user: models.User = Depends(get_current_user), db: Session = De
             "status": appointment.status,
         }
     }
+
 
 @app.post("/patient/daily-log")
 def save_daily_log(
@@ -812,8 +800,8 @@ def save_daily_log(
     else:
         log = models.DailyLog(
             patient_id=patient_id,
-            question=json.dumps(payload.questions),   # old schema compatibility
-            answer_yes=payload.meds_taken,           # old schema compatibility
+            question=json.dumps(payload.questions),
+            answer_yes=payload.meds_taken,
             log_date=today,
             meds_taken=payload.meds_taken,
             mood=payload.mood,
@@ -840,6 +828,7 @@ def save_daily_log(
         "questions": payload.questions,
         "realert_active": not payload.meds_taken,
     }
+
 
 @app.get("/patient/medications")
 def get_patient_medications(
@@ -946,22 +935,19 @@ def mark_medication_taken(
         "taken": bool(med.taken),
     }
 
-# -----------------------------
-# POST Doctor Note
-# -----------------------------
+
 @app.post("/doctor/notes/{patient_id}")
 def add_doctor_note(
     patient_id: int,
     note: models.DoctorNoteCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-
     detected_language = detect(note.note)
 
     new_note = models.DoctorNote(
         patient_id=patient_id,
         note=note.note,
-        language=detected_language
+        language=detected_language,
     )
 
     db.add(new_note)
@@ -970,36 +956,27 @@ def add_doctor_note(
 
     return {
         "message": "Doctor note added",
-        "language": detected_language
+        "language": detected_language,
     }
 
 
-# -----------------------------
-# GET Patient Summary
-# -----------------------------
 @app.get("/doctor/summary/{patient_id}")
 def get_patient_summary(
     patient_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-
     notes = db.query(models.DoctorNote).filter(
         models.DoctorNote.patient_id == patient_id
     ).all()
 
     return notes
 
-# -----------------------------
-# POST Chat (Sadhana)
-# -----------------------------
-class ChatRequest(BaseModel):
-    patient_id: str
-    message: str
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
     patient_id_text = request.patient_id.strip()
     requested_patient_id: int | None = None
+
     if patient_id_text.isdigit():
         requested_patient_id = int(patient_id_text)
     elif patient_id_text.startswith("patient_") and patient_id_text[8:].isdigit():
@@ -1030,8 +1007,11 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Chat service unavailable. Configure OPENAI_API_KEY to enable chatbot.",
         )
+
     response = chat(request.patient_id, request.message)
+
     if normalized_patient_id:
         db.add(models.ChatMessage(patient_id=normalized_patient_id, role="assistant", content=response))
         db.commit()
+
     return {"response": response}
