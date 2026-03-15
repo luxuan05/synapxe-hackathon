@@ -1,5 +1,17 @@
-import { useEffect, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+import DateTimePicker, {
+  DateTimePickerEvent,
+} from '@react-native-community/datetimepicker';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -16,23 +28,63 @@ const MEDICAL_CONDITION_OPTIONS = [
   'Thyroid Disorder',
 ];
 
+const pad = (value: number) => String(value).padStart(2, '0');
+
+const formatDateForApi = (date: Date) => {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+};
+
+const formatDateForDisplay = (date: Date) => {
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()}`;
+};
+
+const parseStoredDate = (value?: string | null) => {
+  if (!value) return null;
+
+  // Handles YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split('-').map(Number);
+    return new Date(year, month - 1, day);
+  }
+
+  // Handles DD/MM/YYYY
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(value)) {
+    const [day, month, year] = value.split('/').map(Number);
+    return new Date(year, month - 1, day);
+  }
+
+  return null;
+};
+
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
-  const [chatOpen, setChatOpen] = useState(false);
   const { logout, user, needsProfileSetup, profileParticulars, completeProfileSetup } = useAuth();
-  const displayName = user?.name ?? 'Patient';
-  const avatarText = displayName.trim().charAt(0).toUpperCase() || 'P';
-  const patientCode = user?.id ? `#PH-${String(user.id).padStart(5, '0')}` : '#PH-00000';
+
+  const [chatOpen, setChatOpen] = useState(false);
   const [showParticularsModal, setShowParticularsModal] = useState(false);
-  const [dob, setDob] = useState(profileParticulars?.dateOfBirth ?? '');
-  const [phone, setPhone] = useState(profileParticulars?.phone ?? '');
-  const [address, setAddress] = useState(profileParticulars?.address ?? '');
-  const [emergencyContact, setEmergencyContact] = useState(profileParticulars?.emergencyContact ?? '');
-  const [medicalConditions, setMedicalConditions] = useState<string[]>(profileParticulars?.medicalConditions ?? []);
-  const [medicationList, setMedicationList] = useState(profileParticulars?.medicationList ?? '');
   const [showConditionsDropdown, setShowConditionsDropdown] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
   const [isSavingParticulars, setIsSavingParticulars] = useState(false);
+
+  const initialDobDate = useMemo(
+    () => parseStoredDate(profileParticulars?.dateOfBirth) ?? new Date(1991, 0, 1),
+    [profileParticulars?.dateOfBirth]
+  );
+
+  const [dobDate, setDobDate] = useState<Date>(initialDobDate);
+  const [showDobPicker, setShowDobPicker] = useState(false);
+
+  const [phone, setPhone] = useState(profileParticulars?.phone ?? '');
+  const [address, setAddress] = useState(profileParticulars?.address ?? '');
+  const [emergencyContact, setEmergencyContact] = useState(profileParticulars?.emergencyContact ?? '');
+  const [medicalConditions, setMedicalConditions] = useState<string[]>(
+    profileParticulars?.medicalConditions ?? []
+  );
+  const [medicationList, setMedicationList] = useState(profileParticulars?.medicationList ?? '');
+
+  const displayName = user?.name ?? 'Patient';
+  const avatarText = displayName.trim().charAt(0).toUpperCase() || 'P';
+  const patientCode = user?.id ? `#PH-${String(user.id).padStart(5, '0')}` : '#PH-00000';
 
   useEffect(() => {
     if (needsProfileSetup) {
@@ -42,7 +94,12 @@ export default function ProfileScreen() {
 
   useEffect(() => {
     if (!profileParticulars) return;
-    setDob(profileParticulars.dateOfBirth ?? '');
+
+    const parsedDob = parseStoredDate(profileParticulars.dateOfBirth);
+    if (parsedDob) {
+      setDobDate(parsedDob);
+    }
+
     setPhone(profileParticulars.phone ?? '');
     setAddress(profileParticulars.address ?? '');
     setEmergencyContact(profileParticulars.emergencyContact ?? '');
@@ -89,9 +146,25 @@ export default function ProfileScreen() {
     },
   ];
 
+  const toggleCondition = (condition: string) => {
+    setMedicalConditions((current) =>
+      current.includes(condition) ? current.filter((item) => item !== condition) : [...current, condition]
+    );
+  };
+
+  const handleDobChange = (event: DateTimePickerEvent, selectedDate?: Date) => {
+    if (Platform.OS === 'android') {
+      setShowDobPicker(false);
+    }
+
+    if (event.type === 'dismissed') return;
+    if (selectedDate) {
+      setDobDate(selectedDate);
+    }
+  };
+
   const handleSaveParticulars = async () => {
     if (
-      !dob.trim() ||
       !phone.trim() ||
       !address.trim() ||
       !emergencyContact.trim() ||
@@ -103,15 +176,17 @@ export default function ProfileScreen() {
     }
 
     setIsSavingParticulars(true);
+
     try {
       await completeProfileSetup({
-        dateOfBirth: dob.trim(),
+        dateOfBirth: formatDateForApi(dobDate), // sends YYYY-MM-DD to backend
         phone: phone.trim(),
         address: address.trim(),
         emergencyContact: emergencyContact.trim(),
         medicalConditions,
         medicationList: medicationList.trim(),
       });
+
       setSetupError(null);
       setShowConditionsDropdown(false);
       setShowParticularsModal(false);
@@ -120,12 +195,6 @@ export default function ProfileScreen() {
     } finally {
       setIsSavingParticulars(false);
     }
-  };
-
-  const toggleCondition = (condition: string) => {
-    setMedicalConditions((current) =>
-      current.includes(condition) ? current.filter((item) => item !== condition) : [...current, condition]
-    );
   };
 
   return (
@@ -142,17 +211,21 @@ export default function ProfileScreen() {
         <ScrollView
           style={styles.scroll}
           contentContainerStyle={[styles.container, { paddingTop: insets.top + 92, paddingBottom: 120 }]}
-          showsVerticalScrollIndicator={false}>
+          showsVerticalScrollIndicator={false}
+        >
           <View style={styles.hero}>
             <View style={styles.avatar}>
               <Text style={styles.avatarText}>{avatarText}</Text>
             </View>
+
             <Text style={styles.name}>{displayName}</Text>
             <Text style={styles.patientId}>Patient ID: {patientCode}</Text>
+
             <Pressable style={styles.editButton}>
               <MaterialIcons name="edit" size={15} color="#6f31c3" />
               <Text style={styles.editButtonText}>Edit Profile</Text>
             </Pressable>
+
             <Pressable style={styles.logoutButton} onPress={logout}>
               <MaterialIcons name="logout" size={16} color="#ffffff" />
               <Text style={styles.logoutButtonText}>Logout</Text>
@@ -164,17 +237,23 @@ export default function ProfileScreen() {
               <View style={styles.sectionIcon}>
                 <MaterialIcons name={section.icon} size={20} color="#7a35d5" />
               </View>
+
               <View style={styles.sectionTextWrap}>
                 <Text style={styles.sectionTitle}>{section.label}</Text>
                 <Text style={styles.sectionDetail}>{section.detail}</Text>
               </View>
+
               <MaterialIcons name="chevron-right" size={24} color="#757080" />
             </View>
           ))}
         </ScrollView>
       </View>
 
-      <ChatbotDialog open={chatOpen} onClose={() => setChatOpen(false)} patientId={user?.id ? String(user.id) : undefined} />
+      <ChatbotDialog
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        patientId={user?.id ? String(user.id) : undefined}
+      />
 
       <Modal visible={showParticularsModal} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
@@ -184,13 +263,44 @@ export default function ProfileScreen() {
               Please provide your particulars before continuing to use the app.
             </Text>
 
-            <TextInput
-              value={dob}
-              onChangeText={setDob}
-              placeholder="Date of birth (DD/MM/YYYY)"
-              placeholderTextColor="#8d87a1"
-              style={styles.modalInput}
-            />
+            <Pressable style={styles.dateButton} onPress={() => setShowDobPicker(true)}>
+              <Text style={styles.dateButtonText}>{formatDateForDisplay(dobDate)}</Text>
+              <MaterialIcons name="calendar-today" size={18} color="#6c6680" />
+            </Pressable>
+
+            {showDobPicker && Platform.OS === 'android' ? (
+              <DateTimePicker
+                value={dobDate}
+                mode="date"
+                display="default"
+                maximumDate={new Date()}
+                onChange={handleDobChange}
+              />
+            ) : null}
+
+            {showDobPicker && Platform.OS === 'ios' ? (
+              <Modal transparent animationType="slide" visible={showDobPicker}>
+                <View style={styles.iosPickerOverlay}>
+                  <View style={styles.iosPickerCard}>
+                    <View style={styles.iosPickerHeader}>
+                      <Pressable onPress={() => setShowDobPicker(false)}>
+                        <Text style={styles.iosPickerAction}>Done</Text>
+                      </Pressable>
+                    </View>
+
+                    <DateTimePicker
+                      value={dobDate}
+                      mode="date"
+                      display="spinner"
+                      maximumDate={new Date()}
+                      onChange={handleDobChange}
+                      style={styles.iosPicker}
+                    />
+                  </View>
+                </View>
+              </Modal>
+            ) : null}
+
             <TextInput
               value={phone}
               onChangeText={setPhone}
@@ -199,6 +309,7 @@ export default function ProfileScreen() {
               keyboardType="phone-pad"
               style={styles.modalInput}
             />
+
             <TextInput
               value={address}
               onChangeText={setAddress}
@@ -206,6 +317,7 @@ export default function ProfileScreen() {
               placeholderTextColor="#8d87a1"
               style={styles.modalInput}
             />
+
             <TextInput
               value={emergencyContact}
               onChangeText={setEmergencyContact}
@@ -213,6 +325,7 @@ export default function ProfileScreen() {
               placeholderTextColor="#8d87a1"
               style={styles.modalInput}
             />
+
             <View>
               <Pressable style={styles.dropdownButton} onPress={() => setShowConditionsDropdown((prev) => !prev)}>
                 <Text style={[styles.dropdownButtonText, medicalConditions.length === 0 && styles.dropdownPlaceholder]}>
@@ -220,6 +333,7 @@ export default function ProfileScreen() {
                     ? medicalConditions.join(', ')
                     : 'Medical conditions (select one or more)'}
                 </Text>
+
                 <MaterialIcons
                   name={showConditionsDropdown ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
                   size={22}
@@ -231,6 +345,7 @@ export default function ProfileScreen() {
                 <View style={styles.dropdownMenu}>
                   {MEDICAL_CONDITION_OPTIONS.map((option) => {
                     const selected = medicalConditions.includes(option);
+
                     return (
                       <Pressable key={option} style={styles.dropdownItem} onPress={() => toggleCondition(option)}>
                         <MaterialIcons
@@ -245,6 +360,7 @@ export default function ProfileScreen() {
                 </View>
               ) : null}
             </View>
+
             <TextInput
               value={medicationList}
               onChangeText={setMedicationList}
@@ -258,7 +374,8 @@ export default function ProfileScreen() {
             <Pressable
               style={[styles.modalButton, isSavingParticulars && styles.modalButtonDisabled]}
               onPress={handleSaveParticulars}
-              disabled={isSavingParticulars}>
+              disabled={isSavingParticulars}
+            >
               <Text style={styles.modalButtonText}>
                 {isSavingParticulars ? 'Saving...' : 'Save particulars'}
               </Text>
@@ -459,6 +576,21 @@ const styles = StyleSheet.create({
     color: '#1f1a2b',
     backgroundColor: '#fff',
   },
+  dateButton: {
+    borderWidth: 1,
+    borderColor: '#dfd8ee',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    backgroundColor: '#fff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  dateButtonText: {
+    fontSize: 15,
+    color: '#1f1a2b',
+  },
   dropdownButton: {
     borderWidth: 1,
     borderColor: '#dfd8ee',
@@ -517,5 +649,31 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 15,
     fontWeight: '700',
+  },
+  iosPickerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(24, 17, 38, 0.35)',
+    justifyContent: 'flex-end',
+  },
+  iosPickerCard: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    paddingBottom: 24,
+  },
+  iosPickerHeader: {
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    alignItems: 'flex-end',
+    borderBottomWidth: 1,
+    borderBottomColor: '#ece7f7',
+  },
+  iosPickerAction: {
+    color: '#7a35d5',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  iosPicker: {
+    alignSelf: 'center',
   },
 });

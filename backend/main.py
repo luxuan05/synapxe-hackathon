@@ -11,6 +11,8 @@ from pydantic import BaseModel
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from together import Together
+from dotenv import load_dotenv
 
 from summarise import router as summarise_router
 from layman import router as layman_router
@@ -35,6 +37,7 @@ try:
 except Exception:
     chat = None
 
+load_dotenv()
 
 app = FastAPI()
 app.include_router(summarise_router)
@@ -57,6 +60,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+together_client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
 
 
 class LoginRequest(BaseModel):
@@ -147,6 +152,74 @@ def get_current_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return user
+
+
+def generate_patient_friendly_summary(
+    patient_name: str,
+    doctor_name: str,
+    symptoms: str,
+    diagnosis: str,
+    treatment_plan: str,
+    medications: str,
+    follow_up_instructions: str,
+) -> str:
+    prompt = f"""
+You are a healthcare assistant.
+
+Rewrite the doctor's appointment notes into a short patient-friendly explanation in very simple English.
+
+Patient name: {patient_name}
+Doctor name: {doctor_name}
+
+Doctor's notes:
+Symptoms: {symptoms}
+Diagnosis: {diagnosis}
+Treatment: {treatment_plan}
+Medicine: {medications}
+Next step: {follow_up_instructions}
+
+Rules:
+- Use short, simple, everyday English.
+- Write directly to the patient.
+- Be warm and easy to understand.
+- Do NOT use robotic medical phrases like:
+  "consultation notes indicate"
+  "treatment plan"
+  "medications"
+  "follow-up"
+- Do NOT just copy the doctor's wording.
+- Explain what the patient should do clearly.
+- Explain what the medicine is for in simple words.
+- Do not invent extra medical facts.
+- Do not include a greeting like "Hello".
+- Do not include the doctor's name again.
+- Return only the summary body text.
+
+Good example style:
+You have sprained your ankle, which means the ankle has been injured but is not broken.
+To help it heal, rest it, put ice on it, keep it raised, and use support if needed.
+Take paracetamol to help with pain.
+Please come back next week so your ankle can be checked again.
+
+Now write the patient-friendly summary.
+"""
+
+    response = together_client.chat.completions.create(
+        model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        messages=[
+            {
+                "role": "system",
+                "content": "You rewrite doctor notes into plain English for patients. You never sound robotic or overly clinical.",
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        temperature=0.1,
+    )
+
+    return response.choices[0].message.content.strip()
 
 
 @app.on_event("startup")
@@ -669,27 +742,43 @@ def upsert_appointment_notes(
         note = models.AppointmentNote(appointment_id=appointment.id)
         db.add(note)
 
-    note.symptoms = payload.symptoms
-    note.diagnosis = payload.diagnosis
-    note.treatment_plan = payload.treatment_plan
-    note.medications = payload.medications
-    note.follow_up_instructions = payload.follow_up_instructions
+    note.symptoms = payload.symptoms.strip()
+    note.diagnosis = payload.diagnosis.strip()
+    note.treatment_plan = payload.treatment_plan.strip()
+    note.medications = payload.medications.strip()
+    note.follow_up_instructions = payload.follow_up_instructions.strip()
 
-    summary_text = (
-        f"Hello {patient.full_name}, today's consultation notes indicate {payload.diagnosis}. "
-        f"Treatment plan: {payload.treatment_plan}. Medications: {payload.medications}. "
-        f"Follow-up: {payload.follow_up_instructions}."
-    )
+    try:
+        summary_text = generate_patient_friendly_summary(
+            patient_name=patient.full_name,
+            doctor_name=user.full_name,
+            symptoms=note.symptoms,
+            diagnosis=note.diagnosis,
+            treatment_plan=note.treatment_plan,
+            medications=note.medications,
+            follow_up_instructions=note.follow_up_instructions,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate AI summary: {str(e)}")
+
     summary = db.query(models.AISummary).filter(models.AISummary.appointment_id == appointment.id).first()
     if not summary:
-        summary = models.AISummary(appointment_id=appointment.id, summary_text=summary_text, status="generated")
+        summary = models.AISummary(
+            appointment_id=appointment.id,
+            summary_text=summary_text,
+            status="generated",
+        )
         db.add(summary)
     else:
         summary.summary_text = summary_text
         summary.status = "generated"
 
     db.commit()
-    return {"message": "Appointment notes saved", "summary_text": summary_text, "appointment_id": appointment.id}
+    return {
+        "message": "Appointment notes saved",
+        "summary_text": summary_text,
+        "appointment_id": appointment.id,
+    }
 
 
 @app.get("/patient/profile")

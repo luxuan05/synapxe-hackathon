@@ -7,61 +7,72 @@ import os
 load_dotenv()
 
 router = APIRouter()
-
 client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
 
 
-# --- Request & Response Models ---
-
 class LaymanRequest(BaseModel):
     patient_name: str
-    clinical_notes: str
-    language: str = "English"  # supports Mandarin, Malay, Tamil etc.
+    doctor_name: str
+    consultation_notes: str
 
 
 class LaymanResponse(BaseModel):
     patient_name: str
-    simplified_notes: str
-    language: str
+    summary: str
 
 
-# --- Prompt Builder ---
+def build_layman_prompt(patient_name: str, doctor_name: str, consultation_notes: str) -> str:
+    return f"""
+You are a healthcare assistant rewriting doctor's notes for a patient.
 
-def build_layman_prompt(patient_name: str, clinical_notes: str, language: str) -> str:
-    language_instruction = (
-        f"Reply in {language}."
-        if language.lower() != "english"
-        else "Reply in simple, clear English."
-    )
+Patient name: {patient_name}
+Doctor name: {doctor_name}
 
-    prompt = f"""You are a friendly medical assistant helping elderly patients understand their doctor's notes.
-
-Patient Name: {patient_name}
-
-The doctor wrote the following clinical notes:
-\"\"\"{clinical_notes}\"\"\"
+Doctor's notes:
+{consultation_notes}
 
 Your task:
-- Convert these notes into simple, plain language that an elderly patient with no medical background can easily understand.
-- Avoid all medical jargon. If you must use a medical term, explain it in brackets.
-- Use short sentences. Be warm, calm, and reassuring in tone.
-- Do NOT add any medical advice or diagnoses beyond what the doctor wrote.
-- {language_instruction}"""
+Rewrite the doctor's notes into a short, warm, patient-friendly explanation in very simple English.
 
-    return prompt
+Rules:
+- Write as if you are speaking directly to the patient.
+- Use everyday words only.
+- Do NOT copy the doctor's wording.
+- Do NOT use phrases like:
+  "consultation notes indicate"
+  "treatment plan"
+  "medications"
+  "follow-up"
+- Explain the condition simply.
+- Explain clearly what the patient should do at home.
+- Explain what the medicine is for in simple words.
+- Mention when the patient should come back.
+- Keep it natural, short, and easy to read.
+- Do not add new medical facts.
+- Do not sound robotic or overly formal.
 
+Desired style example:
+Hello Johnny,
 
-# --- Endpoint ---
+You have hurt your ankle, which means the muscles or tissues around it were stretched.
+To help it heal, try to rest it, put ice on it, and keep it raised when you can.
+A bandage can also help support your ankle.
+Take paracetamol if you need help with pain.
+Please come back next week so the doctor can check how your ankle is healing.
+
+Now rewrite the doctor's notes in that style.
+"""
+    
 
 @router.post("/layman", response_model=LaymanResponse)
-async def simplify_notes(request: LaymanRequest):
-    if not request.clinical_notes.strip():
-        raise HTTPException(status_code=400, detail="No clinical notes provided.")
+async def generate_layman_summary(request: LaymanRequest):
+    if not request.consultation_notes.strip():
+        raise HTTPException(status_code=400, detail="Consultation notes are required.")
 
     prompt = build_layman_prompt(
         request.patient_name,
-        request.clinical_notes,
-        request.language
+        request.doctor_name,
+        request.consultation_notes
     )
 
     try:
@@ -70,21 +81,22 @@ async def simplify_notes(request: LaymanRequest):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a warm, friendly assistant that explains medical information to elderly patients in simple language."
+                    "content": "You explain doctor's notes in plain English for patients. You never use clinical or robotic wording."
                 },
                 {
                     "role": "user",
                     "content": prompt
                 }
             ],
-            temperature=0.5,
+            temperature=0.1,
         )
-        simplified = response.choices[0].message.content.strip()
+
+        summary_text = response.choices[0].message.content.strip()
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Together AI error: {str(e)}")
 
     return LaymanResponse(
         patient_name=request.patient_name,
-        simplified_notes=simplified,
-        language=request.language
+        summary=summary_text
     )
