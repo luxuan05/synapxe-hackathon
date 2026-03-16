@@ -33,6 +33,7 @@ type AuthContextValue = {
   loginWithSingpass: (username: string, password: string) => Promise<void>;
   registerWithSingpass: (payload: RegisterPayload) => Promise<void>;
   completeProfileSetup: (payload: ProfileParticulars) => Promise<void>;
+  refreshProfile: () => Promise<void>;
   logout: () => void;
 };
 
@@ -197,6 +198,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setNeedsProfileSetup(false);
   };
 
+  const refreshProfile = async () => {
+    if (!token) return;
+    await loadPatientProfile(token);
+  };
+
   const logout = () => {
     setToken(null);
     setUser(null);
@@ -215,6 +221,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       loginWithSingpass,
       registerWithSingpass,
       completeProfileSetup,
+      refreshProfile,
       logout,
     }),
     [isLoading, needsProfileSetup, profileParticulars, token, user]

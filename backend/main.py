@@ -25,6 +25,7 @@ from patient_logic import (
     is_missed,
     schedule_realert,
     cancel_realert,
+    parse_schedule_time,
 )
 
 from database import Base, engine, get_db
@@ -110,6 +111,12 @@ class GeneratePreSummaryRequest(BaseModel):
     patient_id: int
 
 
+class MedicationUpsertRequest(BaseModel):
+    name: str
+    dosage: str | None = None
+    schedule_time: str
+
+
 class ChatRequest(BaseModel):
     patient_id: str
     message: str
@@ -133,6 +140,54 @@ def create_access_token(user_id: int, role: str, email: str):
     exp = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_MINUTES)
     payload = {"sub": str(user_id), "role": role, "email": email, "exp": exp}
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def normalize_schedule_time(value: str) -> str:
+    try:
+        parsed = parse_schedule_time(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid schedule time. Use HH:MM (24h) or h:mm AM/PM.",
+        )
+    return parsed.strftime("%H:%M")
+
+
+def sync_user_medication_list(db: Session, patient_id: int):
+    meds = (
+        db.query(models.Medication)
+        .filter(models.Medication.patient_id == patient_id)
+        .order_by(models.Medication.name.asc())
+        .all()
+    )
+    names = sorted({(med.name or "").strip() for med in meds if (med.name or "").strip()})
+    user = db.query(models.User).filter(models.User.id == patient_id).first()
+    if user:
+        user.patient_medication_list = ", ".join(names)
+
+
+def seed_medications_from_profile_list(db: Session, patient_id: int, medication_list: str):
+    names = [item.strip() for item in medication_list.split(",") if item.strip()]
+    if not names:
+        return
+    existing = (
+        db.query(models.Medication)
+        .filter(models.Medication.patient_id == patient_id)
+        .all()
+    )
+    existing_names = {(med.name or "").strip().lower() for med in existing}
+    for name in names:
+        if name.lower() in existing_names:
+            continue
+        db.add(
+            models.Medication(
+                patient_id=patient_id,
+                name=name,
+                dosage="",
+                schedule_time="08:00",
+                taken=False,
+            )
+        )
 
 
 def get_current_user(
@@ -782,9 +837,20 @@ def upsert_appointment_notes(
 
 
 @app.get("/patient/profile")
-def get_patient_profile(user: models.User = Depends(get_current_user)):
+def get_patient_profile(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role != "patient":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
+
+    meds = (
+        db.query(models.Medication)
+        .filter(models.Medication.patient_id == user.id)
+        .order_by(models.Medication.name.asc())
+        .all()
+    )
+    if meds:
+        med_names = sorted({(med.name or "").strip() for med in meds if (med.name or "").strip()})
+        user.patient_medication_list = ", ".join(med_names)
+        db.commit()
 
     conditions: list[str] = []
     if user.patient_medical_conditions:
@@ -819,6 +885,8 @@ def update_patient_profile(
     user.patient_emergency_contact = payload.emergency_contact.strip()
     user.patient_medical_conditions = json.dumps(payload.medical_conditions)
     user.patient_medication_list = payload.medication_list.strip()
+    seed_medications_from_profile_list(db, user.id, user.patient_medication_list or "")
+    sync_user_medication_list(db, user.id)
     db.commit()
     return {"message": "Patient profile updated"}
 
@@ -854,6 +922,52 @@ def patient_home(user: models.User = Depends(get_current_user), db: Session = De
             "status": appointment.status,
         }
     }
+
+
+@app.get("/patient/summaries")
+def patient_summaries(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role != "patient":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
+
+    appointments = (
+        db.query(models.Appointment)
+        .filter(models.Appointment.patient_id == user.id)
+        .order_by(models.Appointment.visit_time.desc())
+        .all()
+    )
+
+    response = []
+    for appointment in appointments:
+        summary = (
+            db.query(models.AISummary)
+            .filter(models.AISummary.appointment_id == appointment.id)
+            .first()
+        )
+        if not summary or not (summary.summary_text or "").strip():
+            continue
+
+        note = (
+            db.query(models.AppointmentNote)
+            .filter(models.AppointmentNote.appointment_id == appointment.id)
+            .first()
+        )
+        doctor = db.query(models.User).filter(models.User.id == appointment.doctor_id).first()
+
+        medications: list[str] = []
+        if note and note.medications:
+            medications = [item.strip() for item in note.medications.split(",") if item.strip()]
+
+        response.append(
+            {
+                "id": appointment.id,
+                "date": appointment.visit_time.isoformat(),
+                "doctor_name": doctor.full_name if doctor else "Doctor",
+                "clinic": appointment.venue,
+                "summary_text": summary.summary_text
+            }
+        )
+
+    return response
 
 
 @app.post("/patient/daily-log")
@@ -950,6 +1064,77 @@ def get_patient_medications(
     ]
 
 
+@app.post("/patient/medications")
+def create_patient_medication(
+    payload: MedicationUpsertRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role != "patient":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Patient access only",
+        )
+
+    name = payload.name.strip()
+    dosage = (payload.dosage or "").strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Medication name is required")
+
+    med = models.Medication(
+        patient_id=current_user.id,
+        name=name,
+        dosage=dosage,
+        schedule_time=normalize_schedule_time(payload.schedule_time),
+        taken=False,
+    )
+    db.add(med)
+    sync_user_medication_list(db, current_user.id)
+    db.commit()
+    db.refresh(med)
+    return {
+        "id": med.id,
+        "name": med.name,
+        "dosage": med.dosage,
+        "schedule_time": med.schedule_time,
+        "taken": bool(med.taken),
+    }
+
+
+@app.put("/patient/medications/{medication_id}")
+def update_patient_medication(
+    medication_id: int,
+    payload: MedicationUpsertRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role != "patient":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Patient access only",
+        )
+
+    med = (
+        db.query(models.Medication)
+        .filter(models.Medication.id == medication_id, models.Medication.patient_id == current_user.id)
+        .first()
+    )
+    if not med:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Medication not found")
+
+    name = payload.name.strip()
+    dosage = (payload.dosage or "").strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Medication name is required")
+
+    med.name = name
+    med.dosage = dosage
+    med.schedule_time = normalize_schedule_time(payload.schedule_time)
+    sync_user_medication_list(db, current_user.id)
+    db.commit()
+    return {"message": "Medication updated", "id": med.id}
+
+
 @app.get("/patient/medications/status")
 def get_patient_medication_status(
     current_user: models.User = Depends(get_current_user),
@@ -983,6 +1168,35 @@ def get_patient_medication_status(
         "patient_id": current_user.id,
         "medications": payload,
         "overdue_count": sum(1 for m in payload if m["missed"]),
+    }
+
+
+@app.get("/patient/rewards")
+def get_patient_rewards(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role != "patient":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Patient access only",
+        )
+
+    meds = (
+        db.query(models.Medication)
+        .filter(models.Medication.patient_id == current_user.id)
+        .all()
+    )
+    taken_count = sum(1 for med in meds if bool(med.taken))
+    points_earned = taken_count * 5
+    base_points = 0
+    total_points = base_points + points_earned
+    return {
+        "patient_id": current_user.id,
+        "taken_count": taken_count,
+        "points_earned": points_earned,
+        "base_points": base_points,
+        "total_points": total_points,
     }
 
 

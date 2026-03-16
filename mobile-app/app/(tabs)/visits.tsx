@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -8,53 +8,61 @@ import { useAuth } from '@/hooks/use-auth';
 
 type Summary = {
   id: number;
-  date: string;
-  doctor: string;
+  date: string; // ISO timestamp from backend
+  doctorName: string;
   clinic: string;
-  summary: string;
-  takeaways: string[];
-  followUp: string;
+  summaryText: string;
 };
 
-const summaries: Summary[] = [
-  {
-    id: 1,
-    date: 'Feb 20, 2026',
-    doctor: 'Dr. Emily Chen',
-    clinic: 'City Health Clinic',
-    summary: 'Discussed blood sugar levels and adjusted medication dosage. Overall health is improving with current treatment plan.',
-    takeaways: [
-      'Blood sugar levels improved over the past month',
-      'Continue current diet and exercise routine',
-      'Metformin adjusted from 250mg to 500mg',
-    ],
-    followUp: 'Schedule follow-up in 4 weeks.',
-  },
-  {
-    id: 2,
-    date: 'Jan 15, 2026',
-    doctor: 'Dr. James Park',
-    clinic: 'Heart & Wellness Center',
-    summary: 'Annual heart checkup completed. EKG results are normal.',
-    takeaways: ['Heart health is in good condition', 'Blood pressure remains in normal range'],
-    followUp: 'Next annual checkup in 12 months.',
-  },
-  {
-    id: 3,
-    date: 'Dec 5, 2025',
-    doctor: 'Dr. Maria Santos',
-    clinic: 'City Health Clinic',
-    summary: 'Vitamin D deficiency detected. Prescribed supplementation and recommended more time outdoors.',
-    takeaways: ['Start Vitamin D 1000 IU daily', 'Try to get 15 minutes of sunlight daily'],
-    followUp: 'Recheck Vitamin D levels in 3 months.',
-  },
-];
+const API_BASE =
+  process.env.EXPO_PUBLIC_API_BASE_URL ??
+  (Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000');
 
 export default function VisitsScreen() {
   const insets = useSafeAreaInsets();
-  const [expanded, setExpanded] = useState<number | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
-  const { user } = useAuth();
+  const { user, token } = useAuth();
+  const [summaries, setSummaries] = useState<Summary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!token) return;
+    const run = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(`${API_BASE}/patient/summaries`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail ?? 'Failed to load visit summaries');
+        }
+        const data = (await res.json()) as Array<{
+          id: number;
+          date: string;
+          doctor_name: string;
+          clinic: string;
+          summary_text: string;
+        }>;
+        setSummaries(
+          data.map((item) => ({
+            id: item.id,
+            date: item.date,
+            doctorName: `Dr. ${item.doctor_name}`,
+            clinic: item.clinic,
+            summaryText: item.summary_text
+          }))
+        );
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to load visit summaries');
+      } finally {
+        setLoading(false);
+      }
+    };
+    void run();
+  }, [token]);
 
   return (
     <>
@@ -76,50 +84,38 @@ export default function VisitsScreen() {
             <Text style={styles.heroSubtitle}>Your simplified appointment notes</Text>
           </View>
 
-          {summaries.map((item) => {
-            const open = expanded === item.id;
-            return (
+          {loading ? (
+            <View style={styles.stateCard}>
+              <ActivityIndicator size="small" color="#7a35d5" />
+              <Text style={styles.stateText}>Loading summaries...</Text>
+            </View>
+          ) : error ? (
+            <View style={styles.stateCard}>
+              <Text style={styles.stateErrorText}>{error}</Text>
+            </View>
+          ) : summaries.length === 0 ? (
+            <View style={styles.stateCard}>
+              <Text style={styles.stateText}>No doctor summaries available yet.</Text>
+            </View>
+          ) : summaries.map((item) => (
               <View key={item.id} style={styles.card}>
                 <View style={styles.doctorRow}>
                   <View style={styles.doctorIconWrap}>
                     <MaterialIcons name="medical-services" size={20} color="#7a35d5" />
                   </View>
                   <View style={styles.doctorTextWrap}>
-                    <Text style={styles.doctorName}>{item.doctor}</Text>
+                    <Text style={styles.doctorName}>{item.doctorName}</Text>
                     <Text style={styles.clinicText}>{item.clinic}</Text>
                     <View style={styles.dateRow}>
                       <MaterialIcons name="calendar-month" size={14} color="#706b7b" />
-                      <Text style={styles.dateText}>{item.date}</Text>
+                      <Text style={styles.dateText}>{new Date(item.date).toLocaleDateString('en-SG')}</Text>
                     </View>
                   </View>
                 </View>
 
-                <Text style={styles.summaryText}>{item.summary}</Text>
-
-                {open ? (
-                  <View style={styles.details}>
-                    <Text style={styles.detailsHeading}>Key Takeaways</Text>
-                    {item.takeaways.map((takeaway) => (
-                      <Text key={takeaway} style={styles.detailsItem}>
-                        - {takeaway}
-                      </Text>
-                    ))}
-                    <Text style={styles.detailsHeading}>Follow-up</Text>
-                    <Text style={styles.detailsItem}>{item.followUp}</Text>
-                  </View>
-                ) : null}
-
-                <Pressable style={styles.toggleBtn} onPress={() => setExpanded(open ? null : item.id)}>
-                  <Text style={styles.toggleText}>{open ? 'Hide Summary' : 'View Full Summary'}</Text>
-                  <MaterialIcons
-                    name={open ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
-                    size={18}
-                    color="#6f31c3"
-                  />
-                </Pressable>
+                <Text style={styles.summaryText}>{item.summaryText}</Text>
               </View>
-            );
-          })}
+            ))}
         </ScrollView>
       </View>
 
@@ -252,33 +248,27 @@ const styles = StyleSheet.create({
     fontSize: 17,
     lineHeight: 30,
   },
-  details: {
-    gap: 4,
-  },
-  detailsHeading: {
-    color: '#6f31c3',
-    fontSize: 14,
-    fontWeight: '700',
-    marginTop: 4,
-  },
-  detailsItem: {
-    color: '#474150',
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  toggleBtn: {
-    borderRadius: 14,
-    backgroundColor: '#ece5f7',
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    flexDirection: 'row',
+  stateCard: {
+    borderRadius: 18,
+    backgroundColor: '#fff',
+    paddingVertical: 18,
+    paddingHorizontal: 16,
+    gap: 8,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
+    shadowColor: '#29173e',
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
   },
-  toggleText: {
-    color: '#6f31c3',
-    fontSize: 16,
-    fontWeight: '700',
+  stateText: {
+    color: '#666073',
+    fontSize: 15,
+  },
+  stateErrorText: {
+    color: '#c12f57',
+    fontSize: 14,
+    textAlign: 'center',
   },
 });

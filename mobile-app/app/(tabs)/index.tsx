@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -28,6 +28,7 @@ export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [chatOpen, setChatOpen] = useState(false);
+  const [showAppointmentDetails, setShowAppointmentDetails] = useState(false);
   const { user, token } = useAuth();
   const displayName = user?.name ?? 'Patient';
   const [appointment, setAppointment] = useState<{
@@ -64,6 +65,35 @@ export default function HomeScreen() {
     if (appointment.status === 'completed') return 'Appointment completed';
     return `${appointment.days_left} day${appointment.days_left === 1 ? '' : 's'} left`;
   }, [appointment]);
+
+  const openAppointmentDetails = () => {
+    if (!appointment) {
+      Alert.alert('No appointment', 'There is no appointment to view yet.');
+      return;
+    }
+    setShowAppointmentDetails(true);
+  };
+
+  const handleAddToCalendar = async () => {
+    if (!appointment) {
+      Alert.alert('No appointment', 'There is no appointment to add yet.');
+      return;
+    }
+    try {
+      const start = new Date(appointment.date_time);
+      const end = new Date(start.getTime() + 60 * 60 * 1000);
+      const formatGoogleDate = (date: Date) => date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+      const url =
+        `https://calendar.google.com/calendar/render?action=TEMPLATE` +
+        `&text=${encodeURIComponent(`Appointment with ${appointment.doctor_name}`)}` +
+        `&dates=${formatGoogleDate(start)}/${formatGoogleDate(end)}` +
+        `&details=${encodeURIComponent(`Status: ${appointment.status}`)}` +
+        `&location=${encodeURIComponent(appointment.venue)}`;
+      await Linking.openURL(url);
+    } catch {
+      Alert.alert('Unable to open calendar', 'Please try again.');
+    }
+  };
 
   return (
     <>
@@ -106,7 +136,7 @@ export default function HomeScreen() {
             <Text style={styles.detailText}>{appointment?.venue ?? 'No venue available'}</Text>
           </View>
 
-          <Pressable style={styles.primaryButton}>
+          <Pressable style={styles.primaryButton} onPress={openAppointmentDetails}>
             <Text style={styles.primaryButtonText}>View Details</Text>
           </Pressable>
         </View>
@@ -124,7 +154,7 @@ export default function HomeScreen() {
             </View>
           </View>
 
-          <Pressable style={styles.secondaryButton}>
+          <Pressable style={styles.secondaryButton} onPress={handleAddToCalendar}>
             <Text style={styles.secondaryButtonText}>Add to Calendar</Text>
           </Pressable>
         </View>
@@ -153,6 +183,39 @@ export default function HomeScreen() {
       </ScrollView>
 
       <ChatbotDialog open={chatOpen} onClose={() => setChatOpen(false)} patientId={user?.id ? String(user.id) : undefined} />
+
+      <Modal visible={showAppointmentDetails} transparent animationType="fade" onRequestClose={() => setShowAppointmentDetails(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Appointment Details</Text>
+            {appointment ? (
+              <>
+                <View style={styles.modalRow}>
+                  <Text style={styles.modalLabel}>Doctor</Text>
+                  <Text style={styles.modalValue}>{appointment.doctor_name}</Text>
+                </View>
+                <View style={styles.modalRow}>
+                  <Text style={styles.modalLabel}>Date & Time</Text>
+                  <Text style={styles.modalValue}>{appointmentDateText}</Text>
+                </View>
+                <View style={styles.modalRow}>
+                  <Text style={styles.modalLabel}>Venue</Text>
+                  <Text style={styles.modalValue}>{appointment.venue}</Text>
+                </View>
+                <View style={styles.modalRow}>
+                  <Text style={styles.modalLabel}>Status</Text>
+                  <Text style={styles.modalValue}>{appointment.status}</Text>
+                </View>
+              </>
+            ) : (
+              <Text style={styles.modalValue}>No appointment available.</Text>
+            )}
+            <Pressable style={styles.modalCloseButton} onPress={() => setShowAppointmentDetails(false)}>
+              <Text style={styles.modalCloseButtonText}>Close</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </>
   );
 }
@@ -382,5 +445,46 @@ const styles = StyleSheet.create({
     color: '#1f1a29',
     fontSize: 15,
     fontWeight: '500',
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(24, 17, 38, 0.45)',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  modalCard: {
+    borderRadius: 18,
+    backgroundColor: '#fff',
+    padding: 18,
+    gap: 12,
+  },
+  modalTitle: {
+    color: '#1f1a29',
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  modalRow: {
+    gap: 3,
+  },
+  modalLabel: {
+    color: '#6f687c',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  modalValue: {
+    color: '#221d2f',
+    fontSize: 15,
+  },
+  modalCloseButton: {
+    marginTop: 4,
+    borderRadius: 12,
+    alignItems: 'center',
+    paddingVertical: 11,
+    backgroundColor: '#7a35d5',
+  },
+  modalCloseButtonText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
   },
 });

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Modal,
   Platform,
@@ -12,6 +12,7 @@ import {
 import DateTimePicker, {
   DateTimePickerEvent,
 } from '@react-native-community/datetimepicker';
+import { useFocusEffect } from 'expo-router';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -26,7 +27,9 @@ const MEDICAL_CONDITION_OPTIONS = [
   'Heart Disease',
   'Kidney Disease',
   'Thyroid Disorder',
+  'Others',
 ];
+const MEDICATION_OPTIONS = ['Metformin', 'Lisinopril', 'Aspirin', 'Vitamin D', 'Atorvastatin', 'Others'];
 
 const pad = (value: number) => String(value).padStart(2, '0');
 
@@ -56,15 +59,30 @@ const parseStoredDate = (value?: string | null) => {
   return null;
 };
 
+const splitCsv = (value?: string | null) => {
+  if (!value) return [];
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+};
+
+const API_BASE =
+  process.env.EXPO_PUBLIC_API_BASE_URL ??
+  (Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000');
+
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
-  const { logout, user, needsProfileSetup, profileParticulars, completeProfileSetup } = useAuth();
+  const { logout, user, token, needsProfileSetup, profileParticulars, completeProfileSetup } = useAuth();
 
   const [chatOpen, setChatOpen] = useState(false);
   const [showParticularsModal, setShowParticularsModal] = useState(false);
   const [showConditionsDropdown, setShowConditionsDropdown] = useState(false);
+  const [showMedicationDropdown, setShowMedicationDropdown] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
   const [isSavingParticulars, setIsSavingParticulars] = useState(false);
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [totalPoints, setTotalPoints] = useState<number | null>(null);
 
   const initialDobDate = useMemo(
     () => parseStoredDate(profileParticulars?.dateOfBirth) ?? new Date(1991, 0, 1),
@@ -80,7 +98,9 @@ export default function ProfileScreen() {
   const [medicalConditions, setMedicalConditions] = useState<string[]>(
     profileParticulars?.medicalConditions ?? []
   );
-  const [medicationList, setMedicationList] = useState(profileParticulars?.medicationList ?? '');
+  const [otherMedicalConditionInput, setOtherMedicalConditionInput] = useState('');
+  const [selectedMedicationOptions, setSelectedMedicationOptions] = useState<string[]>([]);
+  const [otherMedicationInput, setOtherMedicationInput] = useState('');
 
   const displayName = user?.name ?? 'Patient';
   const avatarText = displayName.trim().charAt(0).toUpperCase() || 'P';
@@ -91,6 +111,30 @@ export default function ProfileScreen() {
       setShowParticularsModal(true);
     }
   }, [needsProfileSetup]);
+
+  const loadRewards = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await fetch(`${API_BASE}/patient/rewards`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { total_points: number };
+      setTotalPoints(data.total_points);
+    } catch {
+      // keep UI functional even if rewards fetch fails
+    }
+  }, [token]);
+
+  useEffect(() => {
+    void loadRewards();
+  }, [loadRewards]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadRewards();
+    }, [loadRewards])
+  );
 
   useEffect(() => {
     if (!profileParticulars) return;
@@ -103,8 +147,17 @@ export default function ProfileScreen() {
     setPhone(profileParticulars.phone ?? '');
     setAddress(profileParticulars.address ?? '');
     setEmergencyContact(profileParticulars.emergencyContact ?? '');
-    setMedicalConditions(profileParticulars.medicalConditions ?? []);
-    setMedicationList(profileParticulars.medicationList ?? '');
+    const incomingConditions = profileParticulars.medicalConditions ?? [];
+    const knownConditions = incomingConditions.filter((item) => MEDICAL_CONDITION_OPTIONS.includes(item) && item !== 'Others');
+    const otherConditions = incomingConditions.filter((item) => !MEDICAL_CONDITION_OPTIONS.includes(item));
+    setMedicalConditions(otherConditions.length > 0 ? [...knownConditions, 'Others'] : knownConditions);
+    setOtherMedicalConditionInput(otherConditions.join(', '));
+
+    const incomingMeds = splitCsv(profileParticulars.medicationList);
+    const knownMeds = incomingMeds.filter((item) => MEDICATION_OPTIONS.includes(item) && item !== 'Others');
+    const otherMeds = incomingMeds.filter((item) => !MEDICATION_OPTIONS.includes(item));
+    setSelectedMedicationOptions(otherMeds.length > 0 ? [...knownMeds, 'Others'] : knownMeds);
+    setOtherMedicationInput(otherMeds.join(', '));
   }, [profileParticulars]);
 
   const sections = [
@@ -141,7 +194,7 @@ export default function ProfileScreen() {
     },
     {
       label: 'Rewards & Points',
-      detail: '75 points earned',
+      detail: totalPoints !== null ? `${totalPoints} points earned` : 'Loading points...',
       icon: 'card-giftcard' as const,
     },
   ];
@@ -149,6 +202,12 @@ export default function ProfileScreen() {
   const toggleCondition = (condition: string) => {
     setMedicalConditions((current) =>
       current.includes(condition) ? current.filter((item) => item !== condition) : [...current, condition]
+    );
+  };
+
+  const toggleMedicationOption = (option: string) => {
+    setSelectedMedicationOptions((current) =>
+      current.includes(option) ? current.filter((item) => item !== option) : [...current, option]
     );
   };
 
@@ -164,12 +223,20 @@ export default function ProfileScreen() {
   };
 
   const handleSaveParticulars = async () => {
+    const nonOtherConditions = medicalConditions.filter((item) => item !== 'Others');
+    const otherConditions = splitCsv(otherMedicalConditionInput);
+    const finalConditions = Array.from(new Set([...nonOtherConditions, ...otherConditions]));
+
+    const nonOtherMeds = selectedMedicationOptions.filter((item) => item !== 'Others');
+    const otherMeds = splitCsv(otherMedicationInput);
+    const finalMedicationList = Array.from(new Set([...nonOtherMeds, ...otherMeds])).join(', ');
+
     if (
       !phone.trim() ||
       !address.trim() ||
       !emergencyContact.trim() ||
-      medicalConditions.length === 0 ||
-      !medicationList.trim()
+      finalConditions.length === 0 ||
+      !finalMedicationList.trim()
     ) {
       setSetupError('Please fill in all required fields.');
       return;
@@ -183,18 +250,37 @@ export default function ProfileScreen() {
         phone: phone.trim(),
         address: address.trim(),
         emergencyContact: emergencyContact.trim(),
-        medicalConditions,
-        medicationList: medicationList.trim(),
+        medicalConditions: finalConditions,
+        medicationList: finalMedicationList,
       });
 
       setSetupError(null);
       setShowConditionsDropdown(false);
+      setShowMedicationDropdown(false);
       setShowParticularsModal(false);
+      setIsEditingProfile(false);
     } catch (error) {
       setSetupError(error instanceof Error ? error.message : 'Failed to save particulars');
     } finally {
       setIsSavingParticulars(false);
     }
+  };
+
+  const handleOpenEditProfile = () => {
+    setSetupError(null);
+    setShowConditionsDropdown(false);
+    setShowMedicationDropdown(false);
+    setIsEditingProfile(true);
+    setShowParticularsModal(true);
+  };
+
+  const handleCloseParticularsModal = () => {
+    if (needsProfileSetup || isSavingParticulars) return;
+    setShowParticularsModal(false);
+    setShowConditionsDropdown(false);
+    setShowMedicationDropdown(false);
+    setSetupError(null);
+    setIsEditingProfile(false);
   };
 
   return (
@@ -221,7 +307,7 @@ export default function ProfileScreen() {
             <Text style={styles.name}>{displayName}</Text>
             <Text style={styles.patientId}>Patient ID: {patientCode}</Text>
 
-            <Pressable style={styles.editButton}>
+            <Pressable style={styles.editButton} onPress={handleOpenEditProfile}>
               <MaterialIcons name="edit" size={15} color="#6f31c3" />
               <Text style={styles.editButtonText}>Edit Profile</Text>
             </Pressable>
@@ -243,7 +329,6 @@ export default function ProfileScreen() {
                 <Text style={styles.sectionDetail}>{section.detail}</Text>
               </View>
 
-              <MaterialIcons name="chevron-right" size={24} color="#757080" />
             </View>
           ))}
         </ScrollView>
@@ -258,9 +343,11 @@ export default function ProfileScreen() {
       <Modal visible={showParticularsModal} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Complete Your Profile</Text>
+            <Text style={styles.modalTitle}>{needsProfileSetup ? 'Complete Your Profile' : 'Edit Profile'}</Text>
             <Text style={styles.modalSubtitle}>
-              Please provide your particulars before continuing to use the app.
+              {needsProfileSetup
+                ? 'Please provide your particulars before continuing to use the app.'
+                : 'Update your particulars and save your changes.'}
             </Text>
 
             <Pressable style={styles.dateButton} onPress={() => setShowDobPicker(true)}>
@@ -360,26 +447,84 @@ export default function ProfileScreen() {
                 </View>
               ) : null}
             </View>
+            {medicalConditions.includes('Others') ? (
+              <TextInput
+                value={otherMedicalConditionInput}
+                onChangeText={setOtherMedicalConditionInput}
+                placeholder="Other medical condition(s), comma-separated"
+                placeholderTextColor="#8d87a1"
+                style={styles.modalInput}
+              />
+            ) : null}
 
-            <TextInput
-              value={medicationList}
-              onChangeText={setMedicationList}
-              placeholder="Medication list (e.g. Metformin, Atorvastatin)"
-              placeholderTextColor="#8d87a1"
-              style={styles.modalInput}
-            />
+            <View>
+              <Pressable style={styles.dropdownButton} onPress={() => setShowMedicationDropdown((prev) => !prev)}>
+                <Text
+                  style={[
+                    styles.dropdownButtonText,
+                    selectedMedicationOptions.length === 0 && styles.dropdownPlaceholder,
+                  ]}>
+                  {selectedMedicationOptions.length > 0
+                    ? selectedMedicationOptions.join(', ')
+                    : 'Medication list (select one or more)'}
+                </Text>
+                <MaterialIcons
+                  name={showMedicationDropdown ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
+                  size={22}
+                  color="#6c6680"
+                />
+              </Pressable>
+
+              {showMedicationDropdown ? (
+                <View style={styles.dropdownMenu}>
+                  {MEDICATION_OPTIONS.map((option) => {
+                    const selected = selectedMedicationOptions.includes(option);
+                    return (
+                      <Pressable key={option} style={styles.dropdownItem} onPress={() => toggleMedicationOption(option)}>
+                        <MaterialIcons
+                          name={selected ? 'check-box' : 'check-box-outline-blank'}
+                          size={19}
+                          color={selected ? '#7a35d5' : '#7b758c'}
+                        />
+                        <Text style={styles.dropdownItemText}>{option}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              ) : null}
+            </View>
+            {selectedMedicationOptions.includes('Others') ? (
+              <TextInput
+                value={otherMedicationInput}
+                onChangeText={setOtherMedicationInput}
+                placeholder="Other medication(s), comma-separated"
+                placeholderTextColor="#8d87a1"
+                style={styles.modalInput}
+              />
+            ) : null}
 
             {setupError ? <Text style={styles.modalError}>{setupError}</Text> : null}
 
-            <Pressable
-              style={[styles.modalButton, isSavingParticulars && styles.modalButtonDisabled]}
-              onPress={handleSaveParticulars}
-              disabled={isSavingParticulars}
-            >
-              <Text style={styles.modalButtonText}>
-                {isSavingParticulars ? 'Saving...' : 'Save particulars'}
-              </Text>
-            </Pressable>
+            <View style={styles.modalActionRow}>
+              {!needsProfileSetup ? (
+                <Pressable
+                  style={[styles.modalSecondaryButton, isSavingParticulars && styles.modalButtonDisabled]}
+                  onPress={handleCloseParticularsModal}
+                  disabled={isSavingParticulars}
+                >
+                  <Text style={styles.modalSecondaryButtonText}>Cancel</Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                style={[styles.modalButton, isSavingParticulars && styles.modalButtonDisabled]}
+                onPress={handleSaveParticulars}
+                disabled={isSavingParticulars}
+              >
+                <Text style={styles.modalButtonText}>
+                  {isSavingParticulars ? 'Saving...' : needsProfileSetup ? 'Save particulars' : 'Save changes'}
+                </Text>
+              </Pressable>
+            </View>
           </View>
         </View>
       </Modal>
@@ -636,11 +781,34 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   modalButton: {
-    marginTop: 6,
     borderRadius: 12,
     alignItems: 'center',
     paddingVertical: 12,
+    paddingHorizontal: 16,
     backgroundColor: '#7a35d5',
+    flex: 1,
+  },
+  modalActionRow: {
+    marginTop: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  modalSecondaryButton: {
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: '#d5cce7',
+    backgroundColor: '#f8f6fc',
+    minWidth: 110,
+  },
+  modalSecondaryButtonText: {
+    color: '#6a6380',
+    fontSize: 15,
+    fontWeight: '700',
   },
   modalButtonDisabled: {
     opacity: 0.7,
