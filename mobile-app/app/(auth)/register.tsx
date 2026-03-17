@@ -54,7 +54,7 @@ export default function RegisterScreen() {
           </View>
           <View style={styles.headingTextWrap}>
             <Text style={styles.title}>Create Account</Text>
-            <Text style={styles.subtitle}>Patient-only registration (SQLite)</Text>
+            <Text style={styles.subtitle}>Patient-only registration</Text>
           </View>
         </View>
 

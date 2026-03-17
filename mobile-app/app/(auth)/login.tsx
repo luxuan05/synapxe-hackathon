@@ -49,7 +49,7 @@ export default function LoginScreen() {
           </View>
           <View style={styles.headingTextWrap}>
             <Text style={styles.title}>Patient Login</Text>
-            <Text style={styles.subtitle}>SQLite auth (Singpass-mimic)</Text>
+            <Text style={styles.subtitle}>(Singpass-mimic)</Text>
           </View>
         </View>
 

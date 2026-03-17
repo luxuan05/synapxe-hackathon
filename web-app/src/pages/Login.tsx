@@ -49,7 +49,7 @@ const Login = () => {
           </div>
           <div>
             <h1 className="text-xl font-semibold">Doctor Login</h1>
-            <p className="text-sm text-muted-foreground">SQLite auth (Singpass-mimic)</p>
+            <p className="text-sm text-muted-foreground">(Singpass-mimic)</p>
           </div>
         </div>
 

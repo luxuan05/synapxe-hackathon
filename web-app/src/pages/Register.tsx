@@ -50,7 +50,7 @@ const Register = () => {
           </div>
           <div>
             <h1 className="text-xl font-semibold">Create Account</h1>
-            <p className="text-sm text-muted-foreground">Doctor-only registration (SQLite)</p>
+            <p className="text-sm text-muted-foreground">Doctor-only registration</p>
           </div>
         </div>
 
