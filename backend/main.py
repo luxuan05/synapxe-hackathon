@@ -121,6 +121,12 @@ class ChatRequest(BaseModel):
     patient_id: str
     message: str
 
+class MedSuggestRequest(BaseModel):
+    diagnosis: str
+
+class TranslateSummaryRequest(BaseModel):
+    text: str
+    target_language: str  # "zh", "ms", "ta"
 
 def sync_appointment_statuses(db: Session):
     now = datetime.now(timezone.utc)
@@ -718,6 +724,7 @@ def doctor_generate_pre_appointment_summary(
         .first()
     )
 
+    # Fetch recent chat messages from DB
     messages = (
         db.query(models.ChatMessage)
         .filter(models.ChatMessage.patient_id == patient.id)
@@ -726,19 +733,87 @@ def doctor_generate_pre_appointment_summary(
         .all()
     )
 
+    # Fetch recent daily logs from DB
+    logs = (
+        db.query(models.DailyLog)
+        .filter(models.DailyLog.patient_id == patient.id)
+        .order_by(models.DailyLog.log_date.desc())
+        .limit(7)
+        .all()
+    )
+
+    # Build synthesised context for the LLM — filter out error/timeout noise
+    error_phrases = ["taking longer than expected", "having trouble responding", "please try again"]
+    chat_history_text = ""
     if messages:
         ordered = list(reversed(messages))
-        bullets = [f"- {msg.role.capitalize()}: {msg.content.strip()}" for msg in ordered if msg.content.strip()]
-        summary_text = (
-            f"Pre-appointment summary for {patient.full_name}.\n"
-            "Recent chatbot interactions:\n"
-            + "\n".join(bullets)
-        )
+        patient_msgs = [m.content.strip() for m in ordered if m.role == "user" and m.content.strip()]
+        assistant_msgs = [
+            m.content.strip() for m in ordered
+            if m.role == "assistant"
+            and m.content.strip()
+            and not any(p in m.content.lower() for p in error_phrases)
+        ]
+        if patient_msgs:
+            chat_history_text += "\nSymptoms/concerns reported by patient:\n" + "\n".join(f"- {m}" for m in patient_msgs)
+        if assistant_msgs:
+            chat_history_text += "\nAdvice provided by chatbot:\n" + "\n".join(f"- {m}" for m in assistant_msgs)
+
+    # Build daily log context
+    log_text = ""
+    if logs:
+        for log in reversed(logs):
+            log_text += (
+                f"- Date: {log.log_date} | "
+                f"Meds Taken: {'Yes' if log.meds_taken else 'No'} | "
+                f"Mood: {log.mood or 'N/A'}"
+            )
+            if log.questions:
+                try:
+                    qs = json.loads(log.questions)
+                    if qs:
+                        log_text += f" | Questions: {', '.join(qs) if isinstance(qs, list) else qs}"
+                except Exception:
+                    log_text += f" | Questions: {log.questions}"
+            log_text += "\n"
+
+    # If no data at all, store a simple placeholder
+    if not chat_history_text and not log_text:
+        summary_text = f"No chatbot conversations or daily logs found yet for {patient.full_name}."
     else:
-        summary_text = (
-            f"Pre-appointment summary for {patient.full_name}.\n"
-            "No chatbot conversation found yet."
-        )
+        prompt = f"""You are a medical assistant preparing a pre-appointment briefing for a doctor.
+
+Patient: {patient.full_name}
+
+DAILY CHECK-IN LOGS (last 7 days):
+{log_text if log_text else "No daily logs recorded."}
+{chat_history_text}
+
+Write a concise pre-appointment clinical summary for the doctor.
+
+Rules:
+- Write in clear prose paragraphs, NOT as a bullet list or raw transcript
+- Synthesise patterns and trends — do not list individual messages verbatim
+- Highlight only the most clinically relevant points
+- Keep the total summary under 150 words
+- Structure: (1) Medication adherence, (2) Reported symptoms & concerns, (3) Recommendation for the doctor
+- Do not reproduce conversation logs. Do not make diagnoses."""
+
+        try:
+            response = together_client.chat.completions.create(
+                model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You write concise pre-appointment clinical summaries for doctors. Always synthesise into clear prose — never reproduce raw logs or transcripts.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.3,
+            )
+            summary_text = response.choices[0].message.content.strip()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"LLM error: {str(e)}")
 
     record = models.PreAppointmentSummary(
         patient_id=patient.id,
@@ -963,7 +1038,7 @@ def patient_summaries(user: models.User = Depends(get_current_user), db: Session
                 "date": appointment.visit_time.isoformat(),
                 "doctor_name": doctor.full_name if doctor else "Doctor",
                 "clinic": appointment.venue,
-                "summary_text": summary.summary_text
+                "summary_text": summary.summary_text,
             }
         )
 
@@ -1318,3 +1393,54 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
         db.commit()
 
     return {"response": response}
+
+@app.post("/doctor/med-suggestions")
+async def med_suggestions(
+    payload: MedSuggestRequest,
+    user: models.User = Depends(get_current_user),
+):
+    if user.role != "doctor":
+        raise HTTPException(status_code=403, detail="Doctor access only")
+    if not payload.diagnosis.strip():
+        return []
+    try:
+        response = together_client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            messages=[
+                {"role": "system", "content": "You are a clinical reference assistant. Return only valid JSON arrays of medication suggestions. Never add markdown or explanation."},
+                {"role": "user", "content": f'Diagnosis: "{payload.diagnosis.strip()}"\n\nReturn a JSON array of 3-4 commonly prescribed medications. Each item: name, dosage, reason. ONLY valid JSON array.'},
+            ],
+            temperature=0.2,
+        )
+        import re
+        text = response.choices[0].message.content.strip()
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        return json.loads(match.group(0)) if match else []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Suggestion error: {str(e)}")
+    
+@app.post("/patient/translate-summary")
+async def translate_summary(
+    payload: TranslateSummaryRequest,
+    user: models.User = Depends(get_current_user),
+):
+    if user.role != "patient":
+        raise HTTPException(status_code=403, detail="Patient access only")
+
+    lang_names = {"zh": "Simplified Chinese", "ms": "Malay", "ta": "Tamil"}
+    target = lang_names.get(payload.target_language)
+    if not target:
+        raise HTTPException(status_code=400, detail="Unsupported language")
+
+    try:
+        response = together_client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            messages=[
+                {"role": "system", "content": f"You are a medical translator. Translate the text to {target}. Keep it simple, warm, and patient-friendly. Return only the translated text, nothing else."},
+                {"role": "user", "content": payload.text},
+            ],
+            temperature=0.1,
+        )
+        return {"translated_text": response.choices[0].message.content.strip()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Translation error: {str(e)}")

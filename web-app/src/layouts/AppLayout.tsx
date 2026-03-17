@@ -1,7 +1,6 @@
 import { Outlet } from "react-router-dom";
 import AppSidebar from "@/components/AppSidebar";
 import MobileNav from "@/components/MobileNav";
-import ChatbotButton from "@/components/ChatbotButton";
 
 const AppLayout = () => (
   <div className="flex min-h-screen bg-background">
@@ -12,7 +11,6 @@ const AppLayout = () => (
         <Outlet />
       </main>
     </div>
-    <ChatbotButton />
   </div>
 );
 

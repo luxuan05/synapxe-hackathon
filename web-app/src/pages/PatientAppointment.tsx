@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Send, Sparkles, Pencil, Check } from "lucide-react";
+import { useEffect, useMemo, useState, useRef } from "react";
+import { Send, Sparkles, Pencil, Check, Pill, X, Loader2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -18,7 +18,22 @@ type Patient = {
   status: string;
 };
 
+type MedSuggestion = {
+  name: string;
+  dosage: string;
+  reason: string;
+};
+
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:8000";
+
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
 
 const PatientAppointment = () => {
   const { token, user } = useAuth();
@@ -41,10 +56,64 @@ const PatientAppointment = () => {
   const [currentAppointmentId, setCurrentAppointmentId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Medication suggestion state
+  const [medSuggestions, setMedSuggestions] = useState<MedSuggestion[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const lastFetchedDiagnosis = useRef("");
+
+  const debouncedDiagnosis = useDebounce(notes.diagnosis, 800);
 
   const handleChange = (field: string, value: string) => {
     setNotes((prev) => ({ ...prev, [field]: value }));
+    if (field === "diagnosis" && !value.trim()) {
+      setMedSuggestions([]);
+      setDismissed(false);
+      lastFetchedDiagnosis.current = "";
+    }
+  };
+
+  // Fetch medication suggestions from backend
+  useEffect(() => {
+    const diagnosis = debouncedDiagnosis.trim();
+    if (!diagnosis || diagnosis.length < 3 || diagnosis === lastFetchedDiagnosis.current || dismissed) return;
+
+    const fetchSuggestions = async () => {
+      setSuggestionsLoading(true);
+      lastFetchedDiagnosis.current = diagnosis;
+      try {
+        const res = await fetch(`${API_BASE}/doctor/med-suggestions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ diagnosis }),
+        });
+        if (!res.ok) throw new Error("Failed to fetch suggestions");
+        const data = (await res.json()) as MedSuggestion[];
+        setMedSuggestions(Array.isArray(data) ? data : []);
+        setDismissed(false);
+      } catch {
+        setMedSuggestions([]);
+      } finally {
+        setSuggestionsLoading(false);
+      }
+    };
+
+    void fetchSuggestions();
+  }, [debouncedDiagnosis, dismissed, token]);
+
+  const handleAddSuggestion = (suggestion: MedSuggestion) => {
+    const entry = `${suggestion.name} ${suggestion.dosage}`;
+    setNotes((prev) => ({
+      ...prev,
+      medication: prev.medication ? `${prev.medication}, ${entry}` : entry,
+    }));
+    setMedSuggestions((prev) => prev.filter((s) => s.name !== suggestion.name));
   };
 
   useEffect(() => {
@@ -59,11 +128,11 @@ const PatientAppointment = () => {
         if (data.length > 0) {
           const nextDate = initialDate || sgDateKey(data[0].appointment_time);
           setSelectedDate(nextDate);
-          const candidate = initialPatientId !== null ? data.find((patient) => patient.id === initialPatientId) : null;
+          const candidate = initialPatientId !== null ? data.find((p) => p.id === initialPatientId) : null;
           if (candidate && sgDateKey(candidate.appointment_time) === nextDate) {
             setSelectedPatientId(candidate.id);
           } else {
-            const firstForDate = data.find((patient) => sgDateKey(patient.appointment_time) === nextDate);
+            const firstForDate = data.find((p) => sgDateKey(p.appointment_time) === nextDate);
             setSelectedPatientId(firstForDate?.id ?? data[0].id);
           }
         }
@@ -73,33 +142,35 @@ const PatientAppointment = () => {
   }, [initialDate, initialPatientId, token]);
 
   const filteredPatients = useMemo(
-    () => (selectedDate ? patients.filter((patient) => sgDateKey(patient.appointment_time) === selectedDate) : patients),
+    () => (selectedDate ? patients.filter((p) => sgDateKey(p.appointment_time) === selectedDate) : patients),
     [patients, selectedDate]
   );
 
   useEffect(() => {
-    if (filteredPatients.length === 0) {
-      setSelectedPatientId(null);
-      return;
-    }
-    if (!filteredPatients.some((patient) => patient.id === selectedPatientId)) {
+    if (filteredPatients.length === 0) { setSelectedPatientId(null); return; }
+    if (!filteredPatients.some((p) => p.id === selectedPatientId)) {
       setSelectedPatientId(filteredPatients[0].id);
     }
   }, [filteredPatients, selectedPatientId]);
 
-  const selectedPatient = filteredPatients.find((patient) => patient.id === selectedPatientId) ?? null;
+  useEffect(() => {
+    setSent(false);
+    setSummaryGenerated(false);
+    setSummaryText("");
+    setCurrentAppointmentId(null);
+  }, [selectedPatientId]);
+
+  const selectedPatient = filteredPatients.find((p) => p.id === selectedPatientId) ?? null;
 
   const handleGenerate = async () => {
     if (!token || !selectedPatientId) return;
     setSaving(true);
+    setSent(false);
     setError(null);
     try {
       const res = await fetch(`${API_BASE}/doctor/appointment-notes`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           patient_id: selectedPatientId,
           symptoms: notes.symptoms,
@@ -137,6 +208,7 @@ const PatientAppointment = () => {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.detail ?? "Failed to send summary");
       }
+      setSent(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to send summary");
     } finally {
@@ -151,6 +223,8 @@ const PatientAppointment = () => {
     { key: "medication", label: "Medication Prescribed", placeholder: "List medications and dosages..." },
     { key: "followUp", label: "Follow-up Instructions", placeholder: "Any follow-up notes..." },
   ];
+
+  const showSuggestions = (suggestionsLoading || medSuggestions.length > 0) && !dismissed;
 
   return (
     <div>
@@ -190,15 +264,14 @@ const PatientAppointment = () => {
                 disabled={filteredPatients.length === 0}
               >
                 {filteredPatients.map((patient) => (
-                  <option key={patient.id} value={patient.id}>
-                    {patient.name}
-                  </option>
+                  <option key={patient.id} value={patient.id}>{patient.name}</option>
                 ))}
               </select>
-              {selectedDate && filteredPatients.length === 0 ? (
+              {selectedDate && filteredPatients.length === 0 && (
                 <p className="mt-2 text-xs text-muted-foreground">No patients found for this date.</p>
-              ) : null}
+              )}
             </div>
+
             {fields.map((field) => (
               <div key={field.key}>
                 <label className="text-sm font-medium text-foreground mb-1.5 block">{field.label}</label>
@@ -209,13 +282,62 @@ const PatientAppointment = () => {
                   className="resize-none bg-accent/30 border-border focus:border-primary"
                   rows={3}
                 />
+
+                {/* AI medication suggestions shown below the Medication field */}
+                {field.key === "medication" && showSuggestions && (
+                  <div className="mt-2.5 rounded-xl border border-violet-100 bg-violet-50/70 p-3.5">
+                    <div className="flex items-center justify-between mb-2.5">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-violet-700">
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Suggested for "{notes.diagnosis}"
+                      </div>
+                      {!suggestionsLoading && (
+                        <button
+                          onClick={() => { setDismissed(true); setMedSuggestions([]); }}
+                          className="rounded-md p-0.5 text-violet-400 hover:text-violet-600 hover:bg-violet-100 transition-colors"
+                          aria-label="Dismiss suggestions"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    {suggestionsLoading ? (
+                      <div className="flex items-center gap-2 text-xs text-violet-500 py-0.5">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Fetching suggestions...
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {medSuggestions.map((s) => (
+                          <button
+                            key={s.name}
+                            onClick={() => handleAddSuggestion(s)}
+                            title={s.reason}
+                            className="group flex items-center gap-1.5 rounded-lg border border-violet-200 bg-white px-2.5 py-1.5 text-xs font-medium text-violet-800 shadow-sm transition-all hover:border-violet-500 hover:bg-violet-600 hover:text-white hover:shadow active:scale-95"
+                          >
+                            <Pill className="h-3 w-3 text-violet-400 group-hover:text-white transition-colors" />
+                            <span className="font-semibold">{s.name}</span>
+                            <span className="text-violet-400 group-hover:text-violet-200 transition-colors font-normal">
+                              · {s.dosage}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <p className="mt-2 text-[10px] text-violet-400">
+                      Click to add · Hover for reason · Always verify before prescribing
+                    </p>
+                  </div>
+                )}
               </div>
             ))}
+
             <Button onClick={handleGenerate} className="w-full mt-2" size="lg" disabled={saving || !selectedPatientId}>
               <Sparkles className="h-4 w-4 mr-2" />
               {saving ? "Saving..." : "Generate Patient Summary"}
             </Button>
-            {error ? <p className="text-sm text-destructive">{error}</p> : null}
+            {error && <p className="text-sm text-destructive">{error}</p>}
           </CardContent>
         </Card>
 
@@ -223,7 +345,11 @@ const PatientAppointment = () => {
         <Card className={`border-none shadow-sm transition-opacity ${summaryGenerated ? "opacity-100" : "opacity-40"}`}>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="text-lg">Patient-Friendly Summary</CardTitle>
-            {summaryGenerated && <Badge className="bg-green-100 text-green-700 hover:bg-green-100">AI Generated</Badge>}
+            {summaryGenerated && (
+              <Badge className={sent ? "bg-blue-100 text-blue-700 hover:bg-blue-100" : "bg-green-100 text-green-700 hover:bg-green-100"}>
+                {sent ? "Sent" : "AI Generated"}
+              </Badge>
+            )}
           </CardHeader>
           <CardContent>
             {summaryGenerated ? (
@@ -235,12 +361,17 @@ const PatientAppointment = () => {
                   <p className="text-muted-foreground italic">— Generated from doctor's notes</p>
                 </div>
                 <div className="flex gap-3">
-                  <Button variant="outline" className="flex-1">
+                  <Button variant="outline" className="flex-1" disabled={sent}>
                     <Pencil className="h-4 w-4 mr-2" /> Edit
                   </Button>
-                  <Button className="flex-1" onClick={handleApproveAndSend} disabled={sending || !currentAppointmentId}>
-                    <Check className="h-4 w-4 mr-2" /> {sending ? "Sending..." : "Approve & Send"}
-                    <Send className="h-4 w-4 ml-2" />
+                  <Button
+                    className="flex-1"
+                    onClick={handleApproveAndSend}
+                    disabled={sending || !currentAppointmentId || sent}
+                  >
+                    <Check className="h-4 w-4 mr-2" />
+                    {sending ? "Sending..." : sent ? "Sent" : "Approve & Send"}
+                    {!sent && <Send className="h-4 w-4 ml-2" />}
                   </Button>
                 </div>
               </div>
