@@ -57,6 +57,7 @@ const PatientAppointment = () => {
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Medication suggestion state
@@ -158,6 +159,7 @@ const PatientAppointment = () => {
     setSummaryGenerated(false);
     setSummaryText("");
     setCurrentAppointmentId(null);
+    setEditing(false);
   }, [selectedPatientId]);
 
   const selectedPatient = filteredPatients.find((p) => p.id === selectedPatientId) ?? null;
@@ -166,6 +168,7 @@ const PatientAppointment = () => {
     if (!token || !selectedPatientId) return;
     setSaving(true);
     setSent(false);
+    setEditing(false);
     setError(null);
     try {
       const res = await fetch(`${API_BASE}/doctor/appointment-notes`, {
@@ -209,6 +212,7 @@ const PatientAppointment = () => {
         throw new Error(data.detail ?? "Failed to send summary");
       }
       setSent(true);
+      setEditing(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to send summary");
     } finally {
@@ -357,17 +361,34 @@ const PatientAppointment = () => {
                 <div className="bg-accent/40 rounded-xl p-5 text-sm text-foreground leading-relaxed space-y-3">
                   <p><strong>Hello {selectedPatient?.name ?? "Patient"},</strong></p>
                   <p>Here's a summary of your visit today with {user?.name ?? "your doctor"}:</p>
-                  <p>{summaryText}</p>
+
+                  {editing ? (
+                    <Textarea
+                      value={summaryText}
+                      onChange={(e) => setSummaryText(e.target.value)}
+                      className="resize-none bg-white border-border focus:border-primary min-h-[120px]"
+                      rows={6}
+                    />
+                  ) : (
+                    <p>{summaryText}</p>
+                  )}
+
                   <p className="text-muted-foreground italic">— Generated from doctor's notes</p>
                 </div>
                 <div className="flex gap-3">
-                  <Button variant="outline" className="flex-1" disabled={sent}>
-                    <Pencil className="h-4 w-4 mr-2" /> Edit
+                  <Button
+                    variant="outline"
+                    className="flex-1"
+                    disabled={sent}
+                    onClick={() => setEditing((prev) => !prev)}
+                  >
+                    <Pencil className="h-4 w-4 mr-2" />
+                    {editing ? "Done" : "Edit"}
                   </Button>
                   <Button
                     className="flex-1"
                     onClick={handleApproveAndSend}
-                    disabled={sending || !currentAppointmentId || sent}
+                    disabled={sending || !currentAppointmentId || sent || editing}
                   >
                     <Check className="h-4 w-4 mr-2" />
                     {sending ? "Sending..." : sent ? "Sent" : "Approve & Send"}
