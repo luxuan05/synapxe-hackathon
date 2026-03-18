@@ -1,9 +1,10 @@
 import { Redirect, Stack } from 'expo-router';
-
 import { useAuth } from '@/hooks/use-auth';
 
 export default function AuthLayout() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) return null; // splash screen while restoring session
 
   if (isAuthenticated) {
     return <Redirect href="/(tabs)" />;

@@ -1,5 +1,23 @@
-import { createContext, useContext, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { Platform } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
+
+const STORAGE_KEY = 'mediportal.auth';
+
+const storage = {
+  get: async (key: string): Promise<string | null> => {
+    if (Platform.OS === 'web') return localStorage.getItem(key);
+    return SecureStore.getItemAsync(key);
+  },
+  set: async (key: string, value: string): Promise<void> => {
+    if (Platform.OS === 'web') { localStorage.setItem(key, value); return; }
+    await SecureStore.setItemAsync(key, value);
+  },
+  delete: async (key: string): Promise<void> => {
+    if (Platform.OS === 'web') { localStorage.removeItem(key); return; }
+    await SecureStore.deleteItemAsync(key);
+  },
+};
 
 type AuthUser = {
   id: number;
@@ -46,15 +64,33 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
-  const [isLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [needsProfileSetup, setNeedsProfileSetup] = useState(false);
   const [profileParticulars, setProfileParticulars] = useState<ProfileParticulars | null>(null);
 
+  // On startup, restore saved session
+  useEffect(() => {
+    const restoreSession = async () => {
+      try {
+        const saved = await storage.get(STORAGE_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved) as { token: string; user: AuthUser };
+          setToken(parsed.token);
+          setUser(parsed.user);
+          await loadPatientProfile(parsed.token);
+        }
+      } catch {
+        await storage.delete(STORAGE_KEY);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    void restoreSession();
+  }, []);
+
   const authFetch = async (path: string, init: RequestInit = {}, accessToken?: string) => {
     const bearer = accessToken ?? token;
-    if (!bearer) {
-      throw new Error('Missing auth token');
-    }
+    if (!bearer) throw new Error('Missing auth token');
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
@@ -138,14 +174,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const data = await res.json();
+    const nextToken = data.access_token as string;
     const nextUser = data.user as AuthUser;
+
     if (nextUser.role !== 'patient') {
       throw new Error('Mobile app login is currently enabled for patient accounts only.');
     }
 
-    setToken(data.access_token as string);
+    setToken(nextToken);
     setUser(nextUser);
-    await loadPatientProfile(data.access_token as string);
+    await storage.set(STORAGE_KEY, JSON.stringify({ token: nextToken, user: nextUser }));
+    await loadPatientProfile(nextToken);
   };
 
   const registerWithSingpass = async (payload: RegisterPayload) => {
@@ -167,15 +206,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const data = await res.json();
+    const nextToken = data.access_token as string;
     const nextUser = data.user as AuthUser;
+
     if (nextUser.role !== 'patient') {
       throw new Error('Mobile app registration is currently enabled for patient accounts only.');
     }
 
-    setToken(data.access_token as string);
+    setToken(nextToken);
     setUser(nextUser);
     setNeedsProfileSetup(true);
     setProfileParticulars(null);
+    await storage.set(STORAGE_KEY, JSON.stringify({ token: nextToken, user: nextUser }));
   };
 
   const completeProfileSetup = async (payload: ProfileParticulars) => {
@@ -203,11 +245,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await loadPatientProfile(token);
   };
 
-  const logout = () => {
+  const logout = async () => {
     setToken(null);
     setUser(null);
     setNeedsProfileSetup(false);
     setProfileParticulars(null);
+    await storage.delete(STORAGE_KEY);
   };
 
   const value = useMemo<AuthContextValue>(
