@@ -1,4 +1,9 @@
-
+"""
+patient_logic.py
+----------------
+Non-AI patient business logic: scheduling, medication checks, Pydantic models.
+No changes needed for agentic upgrade — this file is pure domain logic.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -9,7 +14,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 import models
-
 
 scheduler = BackgroundScheduler()
 _scheduler_started = False
@@ -35,7 +39,6 @@ def parse_schedule_time(value: str):
 def is_missed(schedule_time: str, taken: bool) -> bool:
     if taken:
         return False
-
     now = datetime.now().time()
     scheduled = parse_schedule_time(schedule_time)
     return now > scheduled
@@ -66,7 +69,6 @@ def reminder_job(patient_id: int):
                 scheduler.remove_job(get_job_id(patient_id))
             print(f"[Reminder stopped] Patient {patient_id} has no overdue meds.")
             return
-
         med_names = ", ".join(m.name for m in overdue)
         print(f"[30-min Re-alert] Patient {patient_id} still has overdue meds: {med_names}")
     finally:
@@ -76,11 +78,9 @@ def reminder_job(patient_id: int):
 def schedule_realert(patient_id: int):
     ensure_scheduler_started()
     job_id = get_job_id(patient_id)
-
     existing = scheduler.get_job(job_id)
     if existing:
         scheduler.remove_job(job_id)
-
     scheduler.add_job(
         reminder_job,
         "interval",

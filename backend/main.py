@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import re
 
 import bcrypt
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -27,6 +28,7 @@ from patient_logic import (
     cancel_realert,
     parse_schedule_time,
 )
+from agent_tools import TOOL_DEFINITIONS, run_agentic_loop
 
 from database import Base, engine, get_db
 import models
@@ -63,7 +65,10 @@ app.add_middleware(
 )
 
 together_client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
+AGENT_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 
+
+# ── Pydantic models ────────────────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):
     username: str
@@ -121,12 +126,18 @@ class ChatRequest(BaseModel):
     patient_id: str
     message: str
 
+
 class MedSuggestRequest(BaseModel):
     diagnosis: str
+    patient_id: int | None = None  # optional — agent uses it to fetch context
+
 
 class TranslateSummaryRequest(BaseModel):
     text: str
     target_language: str  # "zh", "ms", "ta"
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def sync_appointment_statuses(db: Session):
     now = datetime.now(timezone.utc)
@@ -202,13 +213,11 @@ def get_current_user(
 ):
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
-
     try:
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = int(payload.get("sub"))
     except (JWTError, TypeError, ValueError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
@@ -223,65 +232,81 @@ def generate_patient_friendly_summary(
     treatment_plan: str,
     medications: str,
     follow_up_instructions: str,
+    db: Session | None = None,
+    patient_id: int | None = None,
 ) -> str:
-    prompt = f"""
-You are a healthcare assistant.
+    """
+    Agentic version: if patient_id + db are provided, the agent fetches
+    the patient's full profile and conditions before writing the summary,
+    enabling a more personalised explanation.
+    """
+    base_notes = (
+        f"Symptoms: {symptoms}\n"
+        f"Diagnosis: {diagnosis}\n"
+        f"Treatment: {treatment_plan}\n"
+        f"Medicine: {medications}\n"
+        f"Next step: {follow_up_instructions}"
+    )
 
-Rewrite the doctor's appointment notes into a short patient-friendly explanation in very simple English.
+    system_prompt = """You are a healthcare assistant rewriting doctor's appointment notes 
+into a short patient-friendly explanation in very simple English.
 
-Patient name: {patient_name}
-Doctor name: {doctor_name}
-
-Doctor's notes:
-Symptoms: {symptoms}
-Diagnosis: {diagnosis}
-Treatment: {treatment_plan}
-Medicine: {medications}
-Next step: {follow_up_instructions}
+You have tools to look up the patient's profile and conditions. Use get_patient_profile 
+to personalise your explanation if a patient_id is available.
 
 Rules:
 - Use short, simple, everyday English.
 - Write directly to the patient.
 - Be warm and easy to understand.
-- Do NOT use robotic medical phrases like:
-  "consultation notes indicate"
-  "treatment plan"
-  "medications"
-  "follow-up"
+- Do NOT use robotic medical phrases like "consultation notes indicate", "treatment plan", 
+  "medications", or "follow-up".
 - Do NOT just copy the doctor's wording.
 - Explain what the patient should do clearly.
 - Explain what the medicine is for in simple words.
 - Do not invent extra medical facts.
 - Do not include a greeting like "Hello".
-- Do not include the doctor's name again.
-- Return only the summary body text.
+- Return only the summary body text, under 120 words."""
 
-Good example style:
-You have sprained your ankle, which means the ankle has been injured but is not broken.
-To help it heal, rest it, put ice on it, keep it raised, and use support if needed.
-Take paracetamol to help with pain.
-Please come back next week so your ankle can be checked again.
-
-Now write the patient-friendly summary.
-"""
-
-    response = together_client.chat.completions.create(
-        model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
-        messages=[
-            {
-                "role": "system",
-                "content": "You rewrite doctor notes into plain English for patients. You never sound robotic or overly clinical.",
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        temperature=0.1,
+    user_content = (
+        f"Patient name: {patient_name}\n"
+        f"Doctor name: {doctor_name}\n"
+        + (f"Patient ID: {patient_id}\n" if patient_id else "")
+        + f"\nDoctor's notes:\n{base_notes}\n\n"
+        + (
+            "Use get_patient_profile to fetch the patient's conditions, then write the summary."
+            if patient_id and db
+            else "Write the patient-friendly summary."
+        )
     )
 
-    return response.choices[0].message.content.strip()
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
 
+    if patient_id and db:
+        return run_agentic_loop(
+            client=together_client,
+            model=AGENT_MODEL,
+            messages=messages,
+            db=db,
+            tools=TOOL_DEFINITIONS,
+            max_steps=4,
+            temperature=0.1,
+            max_tokens=300,
+        )
+    else:
+        # Fallback: no DB, single-shot
+        resp = together_client.chat.completions.create(
+            model=AGENT_MODEL,
+            messages=messages,
+            temperature=0.1,
+            max_tokens=300,
+        )
+        return resp.choices[0].message.content.strip()
+
+
+# ── Startup ────────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 def create_tables():
@@ -337,6 +362,8 @@ def create_tables():
                 conn.execute(text("ALTER TABLE daily_logs ADD COLUMN questions TEXT NULL"))
 
 
+# ── Auth ───────────────────────────────────────────────────────────────────────
+
 @app.get("/")
 def root():
     return {"message": "Backend running"}
@@ -347,20 +374,13 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == payload.username).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-
     if not bcrypt.checkpw(payload.password.encode("utf-8"), user.password_hash.encode("utf-8")):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-
     access_token = create_access_token(user.id, user.role, user.email)
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": {
-            "id": user.id,
-            "name": user.full_name,
-            "email": user.email,
-            "role": user.role,
-        },
+        "user": {"id": user.id, "name": user.full_name, "email": user.email, "role": user.role},
     }
 
 
@@ -369,41 +389,25 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     role = payload.role.lower().strip()
     if role not in {"doctor", "patient"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Role must be doctor or patient")
-
     if len(payload.password) < 8:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password must be at least 8 characters",
-        )
-
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be at least 8 characters")
     existing = db.query(models.User).filter(models.User.email == payload.username).first()
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User already exists")
 
     hashed = bcrypt.hashpw(payload.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    user = models.User(
-        email=payload.username,
-        password_hash=hashed,
-        role=role,
-        full_name=payload.full_name,
-    )
+    user = models.User(email=payload.username, password_hash=hashed, role=role, full_name=payload.full_name)
     db.add(user)
     try:
         db.commit()
     except OperationalError as exc:
         db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Database error while creating user: {str(exc)}",
-        )
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Database error: {str(exc)}")
     db.refresh(user)
 
     if user.role == "patient":
         assigned_doctor = (
-            db.query(models.User)
-            .filter(models.User.role == "doctor")
-            .order_by(models.User.id.asc())
-            .first()
+            db.query(models.User).filter(models.User.role == "doctor").order_by(models.User.id.asc()).first()
         )
         if assigned_doctor:
             appointment = models.Appointment(
@@ -420,23 +424,13 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": {
-            "id": user.id,
-            "name": user.full_name,
-            "email": user.email,
-            "role": user.role,
-        },
+        "user": {"id": user.id, "name": user.full_name, "email": user.email, "role": user.role},
     }
 
 
 @app.get("/auth/me")
 def me(user: models.User = Depends(get_current_user)):
-    return {
-        "id": user.id,
-        "name": user.full_name,
-        "email": user.email,
-        "role": user.role,
-    }
+    return {"id": user.id, "name": user.full_name, "email": user.email, "role": user.role}
 
 
 @app.post("/auth/logout")
@@ -449,23 +443,15 @@ def seed_doctor(db: Session = Depends(get_db)):
     existing = db.query(models.User).filter(models.User.email == "doctor@example.com").first()
     if existing:
         return {"message": "Doctor already exists", "email": existing.email}
-
     hashed = bcrypt.hashpw("password123".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    user = models.User(
-        email="doctor@example.com",
-        password_hash=hashed,
-        role="doctor",
-        full_name="Dr. Sarah Ahmed",
-    )
+    user = models.User(email="doctor@example.com", password_hash=hashed, role="doctor", full_name="Dr. Sarah Ahmed")
     db.add(user)
     db.commit()
     db.refresh(user)
-    return {
-        "message": "Seed doctor created",
-        "email": user.email,
-        "password": "password123",
-    }
+    return {"message": "Seed doctor created", "email": user.email, "password": "password123"}
 
+
+# ── Doctor endpoints ───────────────────────────────────────────────────────────
 
 @app.get("/doctor/profile")
 def get_doctor_profile(user: models.User = Depends(get_current_user)):
@@ -499,21 +485,17 @@ def update_doctor_profile(
 def doctor_patients(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Doctor access only")
-
     sync_appointment_statuses(db)
-
     doctor_appointments = (
         db.query(models.Appointment)
         .filter(models.Appointment.doctor_id == user.id)
         .order_by(models.Appointment.visit_time.desc())
         .all()
     )
-
     latest_by_patient: dict[int, models.Appointment] = {}
     for appt in doctor_appointments:
         if appt.patient_id not in latest_by_patient:
             latest_by_patient[appt.patient_id] = appt
-
     response = []
     for patient_id, appt in latest_by_patient.items():
         patient = db.query(models.User).filter(models.User.id == patient_id).first()
@@ -536,26 +518,21 @@ def doctor_patients(user: models.User = Depends(get_current_user), db: Session =
 def doctor_history(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Doctor access only")
-
     sync_appointment_statuses(db)
-
     appointments = (
         db.query(models.Appointment)
         .filter(models.Appointment.doctor_id == user.id)
         .order_by(models.Appointment.visit_time.desc())
         .all()
     )
-
     response = []
     for appt in appointments:
         patient = db.query(models.User).filter(models.User.id == appt.patient_id).first()
         note = db.query(models.AppointmentNote).filter(models.AppointmentNote.appointment_id == appt.id).first()
         summary = db.query(models.AISummary).filter(models.AISummary.appointment_id == appt.id).first()
-
         medications = []
         if note and note.medications:
             medications = [item.strip() for item in note.medications.split(",") if item.strip()]
-
         response.append(
             {
                 "id": appt.id,
@@ -569,7 +546,6 @@ def doctor_history(user: models.User = Depends(get_current_user), db: Session = 
                 "status": appt.status,
             }
         )
-
     return response
 
 
@@ -581,7 +557,6 @@ def doctor_appointment_detail(
 ):
     if user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Doctor access only")
-
     appointment = (
         db.query(models.Appointment)
         .filter(models.Appointment.id == appointment_id, models.Appointment.doctor_id == user.id)
@@ -589,11 +564,9 @@ def doctor_appointment_detail(
     )
     if not appointment:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Appointment not found")
-
     patient = db.query(models.User).filter(models.User.id == appointment.patient_id).first()
     note = db.query(models.AppointmentNote).filter(models.AppointmentNote.appointment_id == appointment.id).first()
     summary = db.query(models.AISummary).filter(models.AISummary.appointment_id == appointment.id).first()
-
     return {
         "id": appointment.id,
         "date": appointment.visit_time.isoformat(),
@@ -617,7 +590,6 @@ def doctor_update_summary(
 ):
     if user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Doctor access only")
-
     appointment = (
         db.query(models.Appointment)
         .filter(models.Appointment.id == appointment_id, models.Appointment.doctor_id == user.id)
@@ -625,12 +597,10 @@ def doctor_update_summary(
     )
     if not appointment:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Appointment not found")
-
     summary = db.query(models.AISummary).filter(models.AISummary.appointment_id == appointment.id).first()
     if not summary:
         summary = models.AISummary(appointment_id=appointment.id, summary_text="", status="generated")
         db.add(summary)
-
     summary.summary_text = payload.summary_text.strip()
     if payload.status:
         summary.status = payload.status.strip()
@@ -646,7 +616,6 @@ def doctor_send_summary(
 ):
     if user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Doctor access only")
-
     appointment = (
         db.query(models.Appointment)
         .filter(models.Appointment.id == appointment_id, models.Appointment.doctor_id == user.id)
@@ -654,13 +623,11 @@ def doctor_send_summary(
     )
     if not appointment:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Appointment not found")
-
     summary = db.query(models.AISummary).filter(models.AISummary.appointment_id == appointment.id).first()
     if not summary:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No summary found to send")
     if not summary.summary_text.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Summary text is empty")
-
     summary.status = "published"
     db.commit()
     return {"message": "Summary sent", "summary_status": summary.status}
@@ -673,14 +640,12 @@ def doctor_pre_appointment_summaries(
 ):
     if user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Doctor access only")
-
     records = (
         db.query(models.PreAppointmentSummary)
         .filter(models.PreAppointmentSummary.doctor_id == user.id)
         .order_by(models.PreAppointmentSummary.generated_at.desc())
         .all()
     )
-
     payload = []
     for record in records:
         patient = db.query(models.User).filter(models.User.id == record.patient_id).first()
@@ -710,110 +675,75 @@ def doctor_generate_pre_appointment_summary(
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """
+    AGENTIC: The agent autonomously fetches daily logs, chat history,
+    medications, and patient profile via tools before writing the summary.
+    No manual data assembly needed.
+    """
     if user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Doctor access only")
 
-    patient = db.query(models.User).filter(models.User.id == payload.patient_id, models.User.role == "patient").first()
+    patient = db.query(models.User).filter(
+        models.User.id == payload.patient_id, models.User.role == "patient"
+    ).first()
     if not patient:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found")
 
     latest_appointment = (
         db.query(models.Appointment)
-        .filter(models.Appointment.patient_id == patient.id, models.Appointment.doctor_id == user.id)
+        .filter(
+            models.Appointment.patient_id == patient.id,
+            models.Appointment.doctor_id == user.id,
+        )
         .order_by(models.Appointment.visit_time.asc())
         .first()
     )
 
-    # Fetch recent chat messages from DB
-    messages = (
-        db.query(models.ChatMessage)
-        .filter(models.ChatMessage.patient_id == patient.id)
-        .order_by(models.ChatMessage.created_at.desc())
-        .limit(12)
-        .all()
-    )
+    system_prompt = """You are a medical assistant preparing a pre-appointment briefing for a doctor.
 
-    # Fetch recent daily logs from DB
-    logs = (
-        db.query(models.DailyLog)
-        .filter(models.DailyLog.patient_id == patient.id)
-        .order_by(models.DailyLog.log_date.desc())
-        .limit(7)
-        .all()
-    )
+Use your tools to gather complete context about the patient:
+1. Call get_patient_profile to understand their conditions
+2. Call get_recent_daily_logs to assess medication adherence and mood
+3. Call get_recent_chat_history to identify symptoms or concerns raised
+4. Call get_patient_medications to see their current medication schedule
 
-    # Build synthesised context for the LLM — filter out error/timeout noise
-    error_phrases = ["taking longer than expected", "having trouble responding", "please try again"]
-    chat_history_text = ""
-    if messages:
-        ordered = list(reversed(messages))
-        patient_msgs = [m.content.strip() for m in ordered if m.role == "user" and m.content.strip()]
-        assistant_msgs = [
-            m.content.strip() for m in ordered
-            if m.role == "assistant"
-            and m.content.strip()
-            and not any(p in m.content.lower() for p in error_phrases)
-        ]
-        if patient_msgs:
-            chat_history_text += "\nSymptoms/concerns reported by patient:\n" + "\n".join(f"- {m}" for m in patient_msgs)
-        if assistant_msgs:
-            chat_history_text += "\nAdvice provided by chatbot:\n" + "\n".join(f"- {m}" for m in assistant_msgs)
-
-    # Build daily log context
-    log_text = ""
-    if logs:
-        for log in reversed(logs):
-            log_text += (
-                f"- Date: {log.log_date} | "
-                f"Meds Taken: {'Yes' if log.meds_taken else 'No'} | "
-                f"Mood: {log.mood or 'N/A'}"
-            )
-            if log.questions:
-                try:
-                    qs = json.loads(log.questions)
-                    if qs:
-                        log_text += f" | Questions: {', '.join(qs) if isinstance(qs, list) else qs}"
-                except Exception:
-                    log_text += f" | Questions: {log.questions}"
-            log_text += "\n"
-
-    # If no data at all, store a simple placeholder
-    if not chat_history_text and not log_text:
-        summary_text = f"No chatbot conversations or daily logs found yet for {patient.full_name}."
-    else:
-        prompt = f"""You are a medical assistant preparing a pre-appointment briefing for a doctor.
-
-Patient: {patient.full_name}
-
-DAILY CHECK-IN LOGS (last 7 days):
-{log_text if log_text else "No daily logs recorded."}
-{chat_history_text}
-
-Write a concise pre-appointment clinical summary for the doctor.
+Then write a concise pre-appointment clinical summary.
 
 Rules:
-- Write in clear prose paragraphs, NOT as a bullet list or raw transcript
-- Synthesise patterns and trends — do not list individual messages verbatim
+- Write in clear prose paragraphs, NOT bullet lists or raw transcripts
+- Synthesise patterns and trends — never list individual messages verbatim
 - Highlight only the most clinically relevant points
 - Keep the total summary under 150 words
-- Structure: (1) Medication adherence, (2) Reported symptoms & concerns, (3) Recommendation for the doctor
+- Structure: (1) Medication adherence, (2) Reported symptoms & concerns, (3) Recommendation
 - Do not reproduce conversation logs. Do not make diagnoses."""
 
-        try:
-            response = together_client.chat.completions.create(
-                model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You write concise pre-appointment clinical summaries for doctors. Always synthesise into clear prose — never reproduce raw logs or transcripts.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.3,
-            )
-            summary_text = response.choices[0].message.content.strip()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"LLM error: {str(e)}")
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                f"Please prepare a pre-appointment summary for patient ID {patient.id} "
+                f"({patient.full_name}). Use all available tools to gather their data first."
+            ),
+        },
+    ]
+
+    try:
+        summary_text = run_agentic_loop(
+            client=together_client,
+            model=AGENT_MODEL,
+            messages=messages,
+            db=db,
+            tools=TOOL_DEFINITIONS,
+            max_steps=7,
+            temperature=0.3,
+            max_tokens=512,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
+
+    if not summary_text:
+        summary_text = f"No data available yet for {patient.full_name}."
 
     record = models.PreAppointmentSummary(
         patient_id=patient.id,
@@ -846,13 +776,18 @@ def upsert_appointment_notes(
     if user.role != "doctor":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Doctor access only")
 
-    patient = db.query(models.User).filter(models.User.id == payload.patient_id, models.User.role == "patient").first()
+    patient = db.query(models.User).filter(
+        models.User.id == payload.patient_id, models.User.role == "patient"
+    ).first()
     if not patient:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found")
 
     appointment = (
         db.query(models.Appointment)
-        .filter(models.Appointment.patient_id == patient.id, models.Appointment.doctor_id == user.id)
+        .filter(
+            models.Appointment.patient_id == patient.id,
+            models.Appointment.doctor_id == user.id,
+        )
         .order_by(models.Appointment.visit_time.desc())
         .first()
     )
@@ -867,7 +802,9 @@ def upsert_appointment_notes(
         db.add(appointment)
         db.flush()
 
-    note = db.query(models.AppointmentNote).filter(models.AppointmentNote.appointment_id == appointment.id).first()
+    note = db.query(models.AppointmentNote).filter(
+        models.AppointmentNote.appointment_id == appointment.id
+    ).first()
     if not note:
         note = models.AppointmentNote(appointment_id=appointment.id)
         db.add(note)
@@ -879,6 +816,7 @@ def upsert_appointment_notes(
     note.follow_up_instructions = payload.follow_up_instructions.strip()
 
     try:
+        # Agentic: passes db + patient_id so agent can fetch patient profile
         summary_text = generate_patient_friendly_summary(
             patient_name=patient.full_name,
             doctor_name=user.full_name,
@@ -887,11 +825,15 @@ def upsert_appointment_notes(
             treatment_plan=note.treatment_plan,
             medications=note.medications,
             follow_up_instructions=note.follow_up_instructions,
+            db=db,
+            patient_id=patient.id,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate AI summary: {str(e)}")
 
-    summary = db.query(models.AISummary).filter(models.AISummary.appointment_id == appointment.id).first()
+    summary = db.query(models.AISummary).filter(
+        models.AISummary.appointment_id == appointment.id
+    ).first()
     if not summary:
         summary = models.AISummary(
             appointment_id=appointment.id,
@@ -911,11 +853,12 @@ def upsert_appointment_notes(
     }
 
 
+# ── Patient endpoints ──────────────────────────────────────────────────────────
+
 @app.get("/patient/profile")
 def get_patient_profile(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role != "patient":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
-
     meds = (
         db.query(models.Medication)
         .filter(models.Medication.patient_id == user.id)
@@ -926,7 +869,6 @@ def get_patient_profile(user: models.User = Depends(get_current_user), db: Sessi
         med_names = sorted({(med.name or "").strip() for med in meds if (med.name or "").strip()})
         user.patient_medication_list = ", ".join(med_names)
         db.commit()
-
     conditions: list[str] = []
     if user.patient_medical_conditions:
         try:
@@ -935,7 +877,6 @@ def get_patient_profile(user: models.User = Depends(get_current_user), db: Sessi
                 conditions = [str(item) for item in parsed]
         except json.JSONDecodeError:
             conditions = []
-
     return {
         "date_of_birth": user.patient_date_of_birth or "",
         "phone": user.patient_phone or "",
@@ -970,22 +911,17 @@ def update_patient_profile(
 def patient_home(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role != "patient":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
-
     sync_appointment_statuses(db)
-
     appointment = (
         db.query(models.Appointment)
         .filter(models.Appointment.patient_id == user.id)
         .order_by(models.Appointment.visit_time.asc())
         .first()
     )
-
     if not appointment:
         return {"appointment": None}
-
     doctor = db.query(models.User).filter(models.User.id == appointment.doctor_id).first()
     days_left = max((appointment.visit_time.date() - datetime.now(timezone.utc).date()).days, 0)
-
     return {
         "appointment": {
             "id": appointment.id,
@@ -1003,14 +939,12 @@ def patient_home(user: models.User = Depends(get_current_user), db: Session = De
 def patient_summaries(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role != "patient":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
-
     appointments = (
         db.query(models.Appointment)
         .filter(models.Appointment.patient_id == user.id)
         .order_by(models.Appointment.visit_time.desc())
         .all()
     )
-
     response = []
     for appointment in appointments:
         summary = (
@@ -1020,18 +954,7 @@ def patient_summaries(user: models.User = Depends(get_current_user), db: Session
         )
         if not summary or not (summary.summary_text or "").strip():
             continue
-
-        note = (
-            db.query(models.AppointmentNote)
-            .filter(models.AppointmentNote.appointment_id == appointment.id)
-            .first()
-        )
         doctor = db.query(models.User).filter(models.User.id == appointment.doctor_id).first()
-
-        medications: list[str] = []
-        if note and note.medications:
-            medications = [item.strip() for item in note.medications.split(",") if item.strip()]
-
         response.append(
             {
                 "id": appointment.id,
@@ -1041,7 +964,6 @@ def patient_summaries(user: models.User = Depends(get_current_user), db: Session
                 "summary_text": summary.summary_text,
             }
         )
-
     return response
 
 
@@ -1052,23 +974,14 @@ def save_daily_log(
     db: Session = Depends(get_db),
 ):
     if current_user.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Patient access only",
-        )
-
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
     patient_id = int(current_user.id)
     today = datetime.now(timezone.utc).date().isoformat()
-
     existing = (
         db.query(models.DailyLog)
-        .filter(
-            models.DailyLog.patient_id == patient_id,
-            models.DailyLog.log_date == today,
-        )
+        .filter(models.DailyLog.patient_id == patient_id, models.DailyLog.log_date == today)
         .first()
     )
-
     if existing:
         existing.question = json.dumps(payload.questions)
         existing.answer_yes = payload.meds_taken
@@ -1096,7 +1009,6 @@ def save_daily_log(
         schedule_realert(patient_id)
 
     db.commit()
-
     return {
         "message": "Daily log saved",
         "patient_id": patient_id,
@@ -1114,18 +1026,13 @@ def get_patient_medications(
     db: Session = Depends(get_db),
 ):
     if current_user.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Patient access only",
-        )
-
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
     meds = (
         db.query(models.Medication)
         .filter(models.Medication.patient_id == current_user.id)
         .order_by(models.Medication.schedule_time.asc())
         .all()
     )
-
     return [
         MedicationResponse(
             id=med.id,
@@ -1146,16 +1053,11 @@ def create_patient_medication(
     db: Session = Depends(get_db),
 ):
     if current_user.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Patient access only",
-        )
-
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
     name = payload.name.strip()
     dosage = (payload.dosage or "").strip()
     if not name:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Medication name is required")
-
     med = models.Medication(
         patient_id=current_user.id,
         name=name,
@@ -1167,13 +1069,7 @@ def create_patient_medication(
     sync_user_medication_list(db, current_user.id)
     db.commit()
     db.refresh(med)
-    return {
-        "id": med.id,
-        "name": med.name,
-        "dosage": med.dosage,
-        "schedule_time": med.schedule_time,
-        "taken": bool(med.taken),
-    }
+    return {"id": med.id, "name": med.name, "dosage": med.dosage, "schedule_time": med.schedule_time, "taken": bool(med.taken)}
 
 
 @app.put("/patient/medications/{medication_id}")
@@ -1184,11 +1080,7 @@ def update_patient_medication(
     db: Session = Depends(get_db),
 ):
     if current_user.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Patient access only",
-        )
-
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
     med = (
         db.query(models.Medication)
         .filter(models.Medication.id == medication_id, models.Medication.patient_id == current_user.id)
@@ -1196,12 +1088,10 @@ def update_patient_medication(
     )
     if not med:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Medication not found")
-
     name = payload.name.strip()
     dosage = (payload.dosage or "").strip()
     if not name:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Medication name is required")
-
     med.name = name
     med.dosage = dosage
     med.schedule_time = normalize_schedule_time(payload.schedule_time)
@@ -1216,17 +1106,12 @@ def get_patient_medication_status(
     db: Session = Depends(get_db),
 ):
     if current_user.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Patient access only",
-        )
-
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
     meds = (
         db.query(models.Medication)
         .filter(models.Medication.patient_id == current_user.id)
         .all()
     )
-
     payload = []
     for med in meds:
         payload.append(
@@ -1238,7 +1123,6 @@ def get_patient_medication_status(
                 "missed": is_missed(med.schedule_time, bool(med.taken)),
             }
         )
-
     return {
         "patient_id": current_user.id,
         "medications": payload,
@@ -1252,11 +1136,7 @@ def get_patient_rewards(
     db: Session = Depends(get_db),
 ):
     if current_user.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Patient access only",
-        )
-
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
     meds = (
         db.query(models.Medication)
         .filter(models.Medication.patient_id == current_user.id)
@@ -1264,14 +1144,12 @@ def get_patient_rewards(
     )
     taken_count = sum(1 for med in meds if bool(med.taken))
     points_earned = taken_count * 5
-    base_points = 0
-    total_points = base_points + points_earned
     return {
         "patient_id": current_user.id,
         "taken_count": taken_count,
         "points_earned": points_earned,
-        "base_points": base_points,
-        "total_points": total_points,
+        "base_points": 0,
+        "total_points": points_earned,
     }
 
 
@@ -1283,72 +1161,41 @@ def mark_medication_taken(
     db: Session = Depends(get_db),
 ):
     if current_user.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Patient access only",
-        )
-
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Patient access only")
     med = (
         db.query(models.Medication)
-        .filter(
-            models.Medication.id == medication_id,
-            models.Medication.patient_id == current_user.id,
-        )
+        .filter(models.Medication.id == medication_id, models.Medication.patient_id == current_user.id)
         .first()
     )
-
     if not med:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Medication not found")
-
     med.taken = payload.taken
     db.commit()
-
     overdue = get_overdue_medications(db, current_user.id)
     if not overdue:
         cancel_realert(current_user.id)
+    return {"message": "Medication updated", "medication_id": med.id, "taken": bool(med.taken)}
 
-    return {
-        "message": "Medication updated",
-        "medication_id": med.id,
-        "taken": bool(med.taken),
-    }
 
+# ── Doctor notes (legacy) ──────────────────────────────────────────────────────
 
 @app.post("/doctor/notes/{patient_id}")
-def add_doctor_note(
-    patient_id: int,
-    note: models.DoctorNoteCreate,
-    db: Session = Depends(get_db),
-):
+def add_doctor_note(patient_id: int, note: models.DoctorNoteCreate, db: Session = Depends(get_db)):
     detected_language = detect(note.note)
-
-    new_note = models.DoctorNote(
-        patient_id=patient_id,
-        note=note.note,
-        language=detected_language,
-    )
-
+    new_note = models.DoctorNote(patient_id=patient_id, note=note.note, language=detected_language)
     db.add(new_note)
     db.commit()
     db.refresh(new_note)
-
-    return {
-        "message": "Doctor note added",
-        "language": detected_language,
-    }
+    return {"message": "Doctor note added", "language": detected_language}
 
 
 @app.get("/doctor/summary/{patient_id}")
-def get_patient_summary(
-    patient_id: int,
-    db: Session = Depends(get_db),
-):
-    notes = db.query(models.DoctorNote).filter(
-        models.DoctorNote.patient_id == patient_id
-    ).all()
-
+def get_patient_summary(patient_id: int, db: Session = Depends(get_db)):
+    notes = db.query(models.DoctorNote).filter(models.DoctorNote.patient_id == patient_id).all()
     return notes
 
+
+# ── Chat (agentic) ─────────────────────────────────────────────────────────────
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
@@ -1377,16 +1224,17 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
                 models.ChatMessage(
                     patient_id=normalized_patient_id,
                     role="assistant",
-                    content="Chat service unavailable. Configure OPENAI_API_KEY to enable chatbot.",
+                    content="Chat service unavailable. Configure TOGETHER_API_KEY to enable chatbot.",
                 )
             )
             db.commit()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Chat service unavailable. Configure OPENAI_API_KEY to enable chatbot.",
+            detail="Chat service unavailable. Configure TOGETHER_API_KEY to enable chatbot.",
         )
 
-    response = chat(request.patient_id, request.message)
+    # Pass db so the agentic chatbot can fetch patient context via tools
+    response = chat(request.patient_id, request.message, db=db)
 
     if normalized_patient_id:
         db.add(models.ChatMessage(patient_id=normalized_patient_id, role="assistant", content=response))
@@ -1394,31 +1242,72 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
 
     return {"response": response}
 
+
+# ── Med suggestions (agentic) ──────────────────────────────────────────────────
+
 @app.post("/doctor/med-suggestions")
 async def med_suggestions(
     payload: MedSuggestRequest,
     user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
+    """
+    AGENTIC: Before suggesting medications, the agent fetches the patient's
+    current medications and conditions to check for interactions and
+    contraindications, then returns contextually safe suggestions.
+    """
     if user.role != "doctor":
         raise HTTPException(status_code=403, detail="Doctor access only")
     if not payload.diagnosis.strip():
         return []
+
+    patient_context = (
+        f" for patient ID {payload.patient_id}" if payload.patient_id else ""
+    )
+
+    system_prompt = """You are a clinical reference assistant.
+
+You have tools to fetch the patient's current medications and medical conditions.
+ALWAYS use these tools before suggesting new medications so you can:
+1. Check for potential drug interactions using check_medication_interactions
+2. Avoid contraindicated medications given the patient's conditions
+3. Suggest safer alternatives if conflicts exist
+
+Return ONLY a valid JSON array of 3-4 medication suggestions.
+Each item must have: name, dosage, reason.
+No markdown, no explanation outside the JSON array."""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                f'Diagnosis: "{payload.diagnosis.strip()}"{patient_context}.\n'
+                f"Use your tools to check the patient's current medications and conditions, "
+                f"then suggest 3-4 safe medications as a JSON array."
+            ),
+        },
+    ]
+
     try:
-        response = together_client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
-            messages=[
-                {"role": "system", "content": "You are a clinical reference assistant. Return only valid JSON arrays of medication suggestions. Never add markdown or explanation."},
-                {"role": "user", "content": f'Diagnosis: "{payload.diagnosis.strip()}"\n\nReturn a JSON array of 3-4 commonly prescribed medications. Each item: name, dosage, reason. ONLY valid JSON array.'},
-            ],
+        result_text = run_agentic_loop(
+            client=together_client,
+            model=AGENT_MODEL,
+            messages=messages,
+            db=db,
+            tools=TOOL_DEFINITIONS,
+            max_steps=6,
             temperature=0.2,
+            max_tokens=512,
         )
-        import re
-        text = response.choices[0].message.content.strip()
-        match = re.search(r'\[.*\]', text, re.DOTALL)
+        match = re.search(r"\[.*\]", result_text, re.DOTALL)
         return json.loads(match.group(0)) if match else []
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Suggestion error: {str(e)}")
-    
+        raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
+
+
+# ── Translate summary ──────────────────────────────────────────────────────────
+
 @app.post("/patient/translate-summary")
 async def translate_summary(
     payload: TranslateSummaryRequest,
@@ -1434,12 +1323,19 @@ async def translate_summary(
 
     try:
         response = together_client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            model=AGENT_MODEL,
             messages=[
-                {"role": "system", "content": f"You are a medical translator. Translate the text to {target}. Keep it simple, warm, and patient-friendly. Return only the translated text, nothing else."},
+                {
+                    "role": "system",
+                    "content": (
+                        f"You are a medical translator. Translate the text to {target}. "
+                        "Keep it simple, warm, and patient-friendly. Return only the translated text."
+                    ),
+                },
                 {"role": "user", "content": payload.text},
             ],
             temperature=0.1,
+            max_tokens=512,
         )
         return {"translated_text": response.choices[0].message.content.strip()}
     except Exception as e:
