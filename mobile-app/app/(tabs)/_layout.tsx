@@ -7,6 +7,7 @@ import { IconSymbol } from '@/components/ui/icon-symbol';
 import { Colors } from '@/constants/theme';
 import { useAuth } from '@/hooks/use-auth';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import BrandLogo from '@/components/brand-logo';
 
 export default function TabLayout() {
   const colorScheme = useColorScheme();
@@ -28,9 +29,13 @@ export default function TabLayout() {
     <Tabs
       screenOptions={{
         tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
-        headerShown: false,
+        headerShown: true,
+        headerTitle: '',
+        headerLeft: () => <BrandLogo size="sm" />,
+        headerLeftContainerStyle: { paddingLeft: 12 },
         tabBarButton: HapticTab,
-      }}>
+      }}
+    >
       <Tabs.Screen
         name="index"
         options={{

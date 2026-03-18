@@ -5,6 +5,7 @@ import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 
 import { useAuth } from '@/hooks/use-auth';
+import BrandLogo from '@/components/brand-logo';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -43,6 +44,10 @@ export default function LoginScreen() {
       <View style={styles.blobBottom} />
 
       <View style={styles.card}>
+        <View style={styles.brandWrap}>
+          <BrandLogo size="lg" />
+        </View>
+
         <View style={styles.headingRow}>
           <View style={styles.iconWrap}>
             <MaterialIcons name="verified-user" size={20} color="#7a35d5" />
@@ -134,6 +139,9 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
     elevation: 3,
     gap: 12,
+  },
+  brandWrap: {
+    marginBottom: 6,
   },
   headingRow: {
     flexDirection: 'row',
