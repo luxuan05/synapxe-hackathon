@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import { API_BASE } from '@/constants/api';
 
 const STORAGE_KEY = 'mediportal.auth';
 
@@ -55,8 +56,6 @@ type AuthContextValue = {
   logout: () => void;
 };
 
-const defaultApiBase = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
-const API_BASE = process.env.EXPO_PUBLIC_API_BASE_URL ?? defaultApiBase;
 const REQUEST_TIMEOUT_MS = 10000;
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);

@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ChatbotDialog } from '@/components/chatbot-dialog';
+import { API_BASE } from '@/constants/api';
 import { useAuth } from '@/hooks/use-auth';
-
-const API_BASE = process.env.EXPO_PUBLIC_API_BASE_URL ?? (Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000');
 const SG_TIMEZONE = 'Asia/Singapore';
 
 const formatSgDateTime = (value: string) => {

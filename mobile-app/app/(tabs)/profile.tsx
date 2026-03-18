@@ -17,6 +17,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ChatbotDialog } from '@/components/chatbot-dialog';
+import { API_BASE } from '@/constants/api';
 import { useAuth } from '@/hooks/use-auth';
 
 const MEDICAL_CONDITION_OPTIONS = [
@@ -66,10 +67,6 @@ const splitCsv = (value?: string | null) => {
     .map((item) => item.trim())
     .filter(Boolean);
 };
-
-const API_BASE =
-  process.env.EXPO_PUBLIC_API_BASE_URL ??
-  (Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000');
 
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -14,6 +13,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ChatbotDialog } from '@/components/chatbot-dialog';
+import { API_BASE } from '@/constants/api';
 import { useAuth } from '@/hooks/use-auth';
 
 type Med = {
@@ -41,10 +41,6 @@ const VOUCHERS = [
   { id: 'v2', title: '$10 Pharmacy Voucher', points: 200 },
   { id: 'v3', title: '$20 Wellness Voucher', points: 350 },
 ];
-const API_BASE =
-  process.env.EXPO_PUBLIC_API_BASE_URL ??
-  (Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000');
-
 export default function MedicationScreen() {
   const insets = useSafeAreaInsets();
   const { user, token, refreshProfile } = useAuth();

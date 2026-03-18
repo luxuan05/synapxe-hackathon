@@ -1,8 +1,8 @@
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import { API_BASE } from '@/constants/api';
 
 const STORAGE_KEY = 'mediportal.auth';
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
 export interface ChatRequest {
   patient_id: string;
@@ -36,7 +36,7 @@ export async function sendChatMessage(
   try {
     const token = await getToken();
 
-    const response = await fetch(`${API_BASE_URL}/chat`, {
+    const response = await fetch(`${API_BASE}/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
