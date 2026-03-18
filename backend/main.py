@@ -52,7 +52,10 @@ SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-me")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_MINUTES = 60 * 24
 
-raw_origins = os.getenv("WEB_APP_ORIGIN", "http://localhost:5173")
+raw_origins = os.getenv(
+    "WEB_APP_ORIGIN",
+    "http://localhost:5173,http://127.0.0.1:5173,https://synapxe-hackathon-webapp.onrender.com",
+)
 allowed_origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
 
 app.add_middleware(

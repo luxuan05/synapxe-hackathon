@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import PageHeader from "@/components/PageHeader";
 import { useAuth } from "@/auth/AuthContext";
+import { API_BASE } from "@/lib/apiBase";
 import { formatSgDate } from "@/lib/datetime";
 
 type Visit = {
@@ -17,8 +18,6 @@ type Visit = {
   summary_text: string;
   summary_status: string;
 };
-
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:8000";
 
 const PatientHistory = () => {
   const { token } = useAuth();

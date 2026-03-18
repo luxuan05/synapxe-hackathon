@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { API_BASE } from "@/lib/apiBase";
 
 type AuthUser = {
   id: number;
@@ -32,7 +33,6 @@ type AuthContextValue = {
 };
 
 const STORAGE_KEY = "mediportal.auth";
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:8000";
 const REQUEST_TIMEOUT_MS = 10000;
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);

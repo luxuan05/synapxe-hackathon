@@ -4,6 +4,7 @@ import PageHeader from "@/components/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/auth/AuthContext";
+import { API_BASE } from "@/lib/apiBase";
 import { formatSgDateTime } from "@/lib/datetime";
 
 type Patient = {
@@ -25,8 +26,6 @@ type PreSummary = {
   summary_text: string;
   generated_at: string;
 };
-
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:8000";
 
 const PatientUpdates = () => {
   const { token } = useAuth();

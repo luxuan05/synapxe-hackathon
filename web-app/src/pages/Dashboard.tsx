@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import PageHeader from "@/components/PageHeader";
 import { useAuth } from "@/auth/AuthContext";
 import { useNavigate } from "react-router-dom";
+import { API_BASE } from "@/lib/apiBase";
 import { formatSgDateTime, sgDateKey } from "@/lib/datetime";
 
 type DoctorPatient = {
@@ -21,8 +22,6 @@ type HistoryItem = {
   id: number;
   summary_sent: boolean;
 };
-
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:8000";
 
 const Dashboard = () => {
   const { user, doctorParticulars, token } = useAuth();

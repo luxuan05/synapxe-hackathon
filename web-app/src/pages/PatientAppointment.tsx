@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import PageHeader from "@/components/PageHeader";
 import { useAuth } from "@/auth/AuthContext";
 import { useSearchParams } from "react-router-dom";
+import { API_BASE } from "@/lib/apiBase";
 import { sgDateKey } from "@/lib/datetime";
 
 type Patient = {
@@ -23,8 +24,6 @@ type MedSuggestion = {
   dosage: string;
   reason: string;
 };
-
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:8000";
 
 function useDebounce<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
